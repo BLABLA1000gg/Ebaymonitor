@@ -1,3 +1,6 @@
+-this script is already patched by ebay and no longer maintained by me since ebay made a lot of changes that I am not familiar with. 
+
+
 eBay Product Monitor
 This script monitors  eBay url listings and sends it to a discord webhooks when new products are listed.
 
