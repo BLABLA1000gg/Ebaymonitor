@@ -2,13 +2,13 @@ import requests
 from bs4 import BeautifulSoup
 import time
 
-WEBHOOK_URL = 'YOUR_WEBHOOK_URL_HERE'
-EBAY_URL = 'YOUR_EBAY_URL_HERE'
+WEBHOOK_URL = 'discord.com....' # Paste your webhook 
+EBAY_URL = 'ebay.de....' # paste exact ebay link
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.182 Safari/537.36'
 }
 
-last_seen_links = set()  # Stores the last seen product links
+last_seen_links = set()  
 
 def send_to_discord(title, link, price, description, image_url):
     data = {
@@ -16,7 +16,7 @@ def send_to_discord(title, link, price, description, image_url):
             "title": title,
             "description": description,
             "url": link,
-            "color": 16711680,  # Color of the embed (Red in this case)
+            "color": 16711680,
             "fields": [{
                 "name": "Price",
                 "value": price,
@@ -41,7 +41,7 @@ def monitor_ebay():
         soup = BeautifulSoup(response.content, 'html.parser')
         listings = soup.select('.s-item')
 
-        current_links = set()  # Stores the current product links for this run
+        current_links = set() 
         for listing in listings:
             link = listing.select_one('.s-item__link')['href']
             title = listing.select_one('.s-item__title').text
@@ -56,8 +56,7 @@ def monitor_ebay():
             if link not in last_seen_links:
                 send_to_discord(title, link, price, '', image_url)
 
-        last_seen_links = current_links  # Update the last seen links for the next run
-
+        last_seen_links = current_links  
     else:
         print(f"Error fetching the eBay page. Status-Code: {response.status_code}")
 
