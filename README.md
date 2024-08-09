@@ -4,8 +4,7 @@ This script monitors  eBay url listings and sends it to a discord webhooks when 
 Features:
 Monitors eBay for specific listings based on a given URL.
 Sends a nwebhooks when new products are detected.
-Uses BeautifulSoup for web scraping.
-Prerequisites:
+
 Python 3
 pip install requests
 pip install beautifulsoup4
@@ -14,16 +13,14 @@ Setup:
 
 Copy code
 pip install -r requirements.txt
-Replace 'YOUR_WEBHOOK_URL_HERE' in the script with your Discord webhook URL.
+Replace the webhook varriable  in the script with your Discord webhook URL.
 
-Replace 'YOUR_EBAY_URL_HERE' in the script with the desired eBay search URL.
+Replace eaby.de in the script with the desired eBay search URL.
 
 Run the script:
 
 The script is set to check eBay every 5 minutes. Adjust the sleep time if needed.
 Use responsibly and avoid sending excessive requests to eBay.
-Contributing:
-If you'd like to contribute, please fork the repository and use a feature branch. Pull requests are warmly welcome.
 
 
 You can input a link and it will monitor the link for new products
