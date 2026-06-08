@@ -43,6 +43,7 @@ class Config:
     interval_seconds: int
     notify_existing: bool
     notify_price_increases: bool
+    notify_statistics: bool
     listing_filter: ListingFilter
 
 
@@ -54,7 +55,6 @@ def text_or_none(element, selector: str) -> str | None:
 def parse_listings(html: str) -> list[Listing]:
     soup = BeautifulSoup(html, "html.parser")
     listings: list[Listing] = []
-
     for element in soup.select(".s-item"):
         link_element = element.select_one(".s-item__link")
         title = text_or_none(element, ".s-item__title")
@@ -62,7 +62,6 @@ def parse_listings(html: str) -> list[Listing]:
         link = link_element.get("href") if link_element else None
         if not link or not title or not price_text or title.casefold() == "shop on ebay":
             continue
-
         image_element = element.select_one(".s-item__image-img")
         image_url = None
         if image_element:
@@ -84,16 +83,11 @@ def parse_listings(html: str) -> list[Listing]:
     return listings
 
 
-def fetch_listings(
-    session: requests.Session,
-    ebay_url: str,
-    timeout: int = DEFAULT_TIMEOUT_SECONDS,
-) -> list[Listing]:
+def fetch_listings(session: requests.Session, ebay_url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> list[Listing]:
     response = session.get(ebay_url, headers=HEADERS, timeout=timeout)
     if response.status_code in {403, 429, 500, 503}:
         raise requests.HTTPError(
-            f"eBay rejected the request with HTTP {response.status_code}; "
-            "the IP may be rate-limited or blocked",
+            f"eBay rejected the request with HTTP {response.status_code}; the IP may be rate-limited or blocked",
             response=response,
         )
     response.raise_for_status()
@@ -110,43 +104,17 @@ def event_should_notify(event: ListingEvent, config: Config, initial_scan: bool)
     return False
 
 
-def send_to_discord(
-    session: requests.Session,
-    webhook_url: str,
-    event: ListingEvent,
-    timeout: int = DEFAULT_TIMEOUT_SECONDS,
-) -> None:
-    colors = {
-        EventType.NEW: 0x3498DB,
-        EventType.PRICE_DROP: 0x2ECC71,
-        EventType.PRICE_INCREASE: 0xE67E22,
-    }
-    labels = {
-        EventType.NEW: "New listing",
-        EventType.PRICE_DROP: "Price dropped",
-        EventType.PRICE_INCREASE: "Price increased",
-    }
+def send_to_discord(session: requests.Session, webhook_url: str, event: ListingEvent, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> None:
+    colors = {EventType.NEW: 0x3498DB, EventType.PRICE_DROP: 0x2ECC71, EventType.PRICE_INCREASE: 0xE67E22}
+    labels = {EventType.NEW: "New listing", EventType.PRICE_DROP: "Price dropped", EventType.PRICE_INCREASE: "Price increased"}
     fields = [{"name": "Price", "value": event.listing.price_text, "inline": True}]
     if event.previous_price is not None:
-        fields.append(
-            {"name": "Previous price", "value": str(event.previous_price), "inline": True}
-        )
+        fields.append({"name": "Previous price", "value": str(event.previous_price), "inline": True})
     if event.price_change_percent is not None:
-        fields.append(
-            {
-                "name": "Change",
-                "value": f"{event.price_change_percent:+.1f}%",
-                "inline": True,
-            }
-        )
-    for label, value in (
-        ("Condition", event.listing.condition),
-        ("Shipping", event.listing.shipping),
-        ("Location", event.listing.location),
-    ):
+        fields.append({"name": "Change", "value": f"{event.price_change_percent:+.1f}%", "inline": True})
+    for label, value in (("Condition", event.listing.condition), ("Shipping", event.listing.shipping), ("Location", event.listing.location)):
         if value:
             fields.append({"name": label, "value": value, "inline": True})
-
     embed = {
         "title": event.listing.title[:256],
         "description": labels[event.type],
@@ -160,30 +128,56 @@ def send_to_discord(
     response.raise_for_status()
 
 
-def scan_once(
-    session: requests.Session,
-    store: MonitorStore,
-    config: Config,
-    initial_scan: bool,
-) -> tuple[int, int]:
+def send_statistics_to_discord(session: requests.Session, webhook_url: str, stats: dict, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> None:
+    currency = stats["currency"] or ""
+    def money(value):
+        return f"{value:.2f} {currency}" if value is not None else "n/a"
+    embed = {
+        "title": "eBay search market summary",
+        "url": stats["search_url"],
+        "color": 0x9B59B6,
+        "description": f"Keywords: {stats['keyword_filter'] or 'none'}",
+        "fields": [
+            {"name": "Average asking price", "value": money(stats["average_price"]), "inline": True},
+            {"name": "Median", "value": money(stats["median_price"]), "inline": True},
+            {"name": "Listings", "value": str(stats["listing_count"]), "inline": True},
+            {"name": "Minimum", "value": money(stats["minimum_price"]), "inline": True},
+            {"name": "Maximum", "value": money(stats["maximum_price"]), "inline": True},
+        ],
+    }
+    response = session.post(webhook_url, json={"embeds": [embed]}, timeout=timeout)
+    response.raise_for_status()
+
+
+def scan_once(session: requests.Session, store: MonitorStore, config: Config, initial_scan: bool) -> tuple[int, int]:
     by_link: dict[str, Listing] = {}
+    keyword_signature = ",".join(config.listing_filter.include_keywords)
     for ebay_url in config.ebay_urls:
-        for listing in fetch_listings(session, ebay_url):
-            if config.listing_filter.matches(listing):
-                by_link[listing.link] = listing
+        matched = [
+            listing
+            for listing in fetch_listings(session, ebay_url)
+            if config.listing_filter.matches(listing)
+        ]
+        stats = store.record_search_statistics(ebay_url, keyword_signature, matched)
+        LOGGER.info(
+            "Search statistics: %s listings, average=%s, median=%s, min=%s, max=%s",
+            stats["listing_count"], stats["average_price"], stats["median_price"],
+            stats["minimum_price"], stats["maximum_price"],
+        )
+        if config.notify_statistics and config.webhook_url:
+            send_statistics_to_discord(session, config.webhook_url, stats)
+        for listing in matched:
+            by_link[listing.link] = listing
 
     events = store.record_scan(list(by_link.values()))
     notified = 0
     for event in events:
-        if not event_should_notify(event, config, initial_scan):
-            continue
-        if config.webhook_url:
+        if event_should_notify(event, config, initial_scan) and config.webhook_url:
             try:
                 send_to_discord(session, config.webhook_url, event)
                 notified += 1
             except requests.RequestException as error:
                 LOGGER.error("Could not notify for %s: %s", event.listing.link, error)
-
     if config.csv_directory:
         store.export_csv(config.csv_directory)
     LOGGER.info("Scan complete: %s matching listings, %s notifications", len(events), notified)
@@ -193,9 +187,7 @@ def scan_once(
 def validate_url(name: str, value: str, allowed_hosts: tuple[str, ...]) -> str:
     parsed = urlparse(value)
     host = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or not any(
-        host == item or host.endswith(f".{item}") for item in allowed_hosts
-    ):
+    if parsed.scheme != "https" or not any(host == item or host.endswith(f".{item}") for item in allowed_hosts):
         raise ValueError(f"{name} must be an HTTPS URL for {', '.join(allowed_hosts)}")
     return value
 
@@ -205,24 +197,21 @@ def decimal_env(name: str) -> Decimal | None:
     return Decimal(value) if value else None
 
 
+def bool_env(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).casefold() in {"1", "true", "yes"}
+
+
 def load_config() -> Config:
     raw_urls = os.environ.get("EBAY_URLS") or os.environ.get("EBAY_URL")
     if not raw_urls:
         raise ValueError("Set EBAY_URL or EBAY_URLS")
-    ebay_urls = tuple(
-        validate_url("EBAY_URL", value.strip(), ("ebay.com", "ebay.de"))
-        for value in raw_urls.split("|")
-        if value.strip()
-    )
+    ebay_urls = tuple(validate_url("EBAY_URL", value.strip(), ("ebay.com", "ebay.de")) for value in raw_urls.split("|") if value.strip())
     webhook = os.getenv("DISCORD_WEBHOOK_URL")
     if webhook:
-        webhook = validate_url(
-            "DISCORD_WEBHOOK_URL", webhook, ("discord.com", "discordapp.com")
-        )
+        webhook = validate_url("DISCORD_WEBHOOK_URL", webhook, ("discord.com", "discordapp.com"))
     interval = int(os.getenv("CHECK_INTERVAL_SECONDS", str(DEFAULT_INTERVAL_SECONDS)))
     if interval < 30:
         raise ValueError("CHECK_INTERVAL_SECONDS must be at least 30")
-
     currency = os.getenv("CURRENCY")
     return Config(
         ebay_urls=ebay_urls,
@@ -230,9 +219,9 @@ def load_config() -> Config:
         database_path=Path(os.getenv("DATABASE_PATH", "ebay_monitor.db")),
         csv_directory=Path(os.environ["CSV_DIRECTORY"]) if os.getenv("CSV_DIRECTORY") else None,
         interval_seconds=interval,
-        notify_existing=os.getenv("NOTIFY_EXISTING", "false").casefold() in {"1", "true", "yes"},
-        notify_price_increases=os.getenv("NOTIFY_PRICE_INCREASES", "false").casefold()
-        in {"1", "true", "yes"},
+        notify_existing=bool_env("NOTIFY_EXISTING"),
+        notify_price_increases=bool_env("NOTIFY_PRICE_INCREASES"),
+        notify_statistics=bool_env("NOTIFY_STATISTICS"),
         listing_filter=ListingFilter(
             include_keywords=parse_csv_words(os.getenv("INCLUDE_KEYWORDS")),
             exclude_keywords=parse_csv_words(os.getenv("EXCLUDE_KEYWORDS")),
@@ -264,15 +253,12 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="Run one scan and exit")
     parser.add_argument("--export", action="store_true", help="Export the database to CSV and exit")
     args = parser.parse_args()
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
     config = load_config()
     if args.export:
         with MonitorStore(config.database_path) as store:
             paths = store.export_csv(config.csv_directory or Path("exports"))
-            LOGGER.info("Exported %s and %s", *paths)
+            LOGGER.info("Exported %s", ", ".join(str(path) for path in paths))
         return
     run_monitor(config, once=args.once)
 
