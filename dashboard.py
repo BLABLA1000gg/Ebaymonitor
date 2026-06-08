@@ -5,7 +5,7 @@ from pathlib import Path
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 from profiles import SearchProfile
-from proxy import ProfileProxyStore
+from proxy import ProfileProxyStore, redact_proxy_url
 from storage import MonitorStore
 
 
@@ -40,10 +40,17 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     enabled=request.form.get("enabled") == "on",
                 )
                 saved_id = database.save_profile(profile)
-                proxies.set(saved_id, request.form.get("proxy_url"))
+                new_proxy = request.form.get("proxy_url", "").strip()
+                if new_proxy:
+                    proxies.set(saved_id, new_proxy)
+                elif request.form.get("clear_proxy") == "on":
+                    proxies.delete(saved_id)
                 return redirect(url_for("index", profile=saved_id))
-            proxy_url = proxies.get(profile_id) if profile_id else None
-        return render_template("profile.html", profile=current, proxy_url=proxy_url)
+            existing_proxy = proxies.get(profile_id) if profile_id else None
+        return render_template(
+            "profile.html", profile=current, proxy_configured=bool(existing_proxy),
+            proxy_display=redact_proxy_url(existing_proxy),
+        )
 
     @app.post("/profiles/<int:profile_id>/delete")
     def delete_profile(profile_id):
