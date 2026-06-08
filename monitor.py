@@ -15,8 +15,16 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0 Safari/537.36"
-    )
+        "Chrome/137.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 
@@ -81,6 +89,12 @@ def fetch_listings(
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> list[Listing]:
     response = session.get(ebay_url, headers=HEADERS, timeout=timeout)
+    if response.status_code in {403, 429, 500, 503}:
+        raise requests.HTTPError(
+            f"eBay rejected the request with HTTP {response.status_code}; "
+            "the IP may be rate-limited or blocked",
+            response=response,
+        )
     response.raise_for_status()
     return parse_listings(response.text)
 
