@@ -44,10 +44,8 @@ CREATE TABLE IF NOT EXISTS search_statistics (
     maximum_price TEXT,
     observed_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_price_history_link_time
-ON price_history(link, observed_at);
-CREATE INDEX IF NOT EXISTS idx_search_statistics_url_time
-ON search_statistics(search_url, observed_at);
+CREATE INDEX IF NOT EXISTS idx_price_history_link_time ON price_history(link, observed_at);
+CREATE INDEX IF NOT EXISTS idx_search_statistics_url_time ON search_statistics(search_url, observed_at);
 """
 
 
@@ -71,18 +69,12 @@ class MonitorStore:
         now = datetime.now(timezone.utc).isoformat()
         events: list[ListingEvent] = []
         seen_links = {listing.link for listing in listings}
-
         with self.connection:
             for listing in listings:
                 previous = self.connection.execute(
                     "SELECT current_price FROM listings WHERE link = ?", (listing.link,)
                 ).fetchone()
-                previous_price = (
-                    Decimal(previous["current_price"])
-                    if previous and previous["current_price"] is not None
-                    else None
-                )
-
+                previous_price = Decimal(previous["current_price"]) if previous and previous["current_price"] is not None else None
                 if previous is None:
                     event_type = EventType.NEW
                 elif listing.price is not None and previous_price is not None and listing.price < previous_price:
@@ -91,7 +83,6 @@ class MonitorStore:
                     event_type = EventType.PRICE_INCREASE
                 else:
                     event_type = EventType.UNCHANGED
-
                 self.connection.execute(
                     """
                     INSERT INTO listings (
@@ -112,7 +103,6 @@ class MonitorStore:
                         listing.shipping, listing.location, now, now,
                     ),
                 )
-
                 if previous is None or listing.price != previous_price:
                     self.connection.execute(
                         """
@@ -122,13 +112,10 @@ class MonitorStore:
                         (
                             listing.link,
                             str(listing.price) if listing.price is not None else None,
-                            listing.price_text,
-                            listing.currency,
-                            now,
+                            listing.price_text, listing.currency, now,
                         ),
                     )
                 events.append(ListingEvent(event_type, listing, previous_price))
-
             if seen_links:
                 placeholders = ",".join("?" for _ in seen_links)
                 self.connection.execute(
@@ -139,12 +126,7 @@ class MonitorStore:
                 self.connection.execute("UPDATE listings SET active = 0")
         return events
 
-    def record_search_statistics(
-        self,
-        search_url: str,
-        keyword_filter: str,
-        listings: list[Listing],
-    ) -> dict[str, Decimal | int | str | None]:
+    def record_search_statistics(self, search_url: str, keyword_filter: str, listings: list[Listing]) -> dict[str, Decimal | int | str | None]:
         priced = [listing for listing in listings if listing.price is not None]
         prices = [listing.price for listing in priced if listing.price is not None]
         average = sum(prices, Decimal("0")) / len(prices) if prices else None
@@ -154,7 +136,6 @@ class MonitorStore:
         currencies = {listing.currency for listing in priced if listing.currency}
         currency = currencies.pop() if len(currencies) == 1 else None
         observed_at = datetime.now(timezone.utc).isoformat()
-
         with self.connection:
             self.connection.execute(
                 """
@@ -173,14 +154,10 @@ class MonitorStore:
                 ),
             )
         return {
-            "search_url": search_url,
-            "keyword_filter": keyword_filter,
-            "currency": currency,
-            "listing_count": len(prices),
-            "average_price": average,
-            "median_price": med,
-            "minimum_price": minimum,
-            "maximum_price": maximum,
+            "search_url": search_url, "keyword_filter": keyword_filter,
+            "currency": currency, "listing_count": len(prices),
+            "average_price": average, "median_price": med,
+            "minimum_price": minimum, "maximum_price": maximum,
         }
 
     def export_csv(self, directory: str | Path) -> tuple[Path, Path, Path]:
@@ -188,14 +165,10 @@ class MonitorStore:
         target.mkdir(parents=True, exist_ok=True)
         listings_path = target / "listings.csv"
         history_path = target / "price_history.csv"
-        statistics_path = target / "search_statistics.csv"
-
+        statistics_path = target / "sold_statistics.csv"
         self._write_query(listings_path, "SELECT * FROM listings ORDER BY last_seen DESC")
         self._write_query(history_path, "SELECT * FROM price_history ORDER BY observed_at DESC")
-        self._write_query(
-            statistics_path,
-            "SELECT * FROM search_statistics ORDER BY observed_at DESC",
-        )
+        self._write_query(statistics_path, "SELECT * FROM search_statistics ORDER BY observed_at DESC")
         return listings_path, history_path, statistics_path
 
     def _write_query(self, path: Path, query: str) -> None:
