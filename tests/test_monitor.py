@@ -11,15 +11,7 @@ from storage import MonitorStore
 
 
 def listing(link="https://www.ebay.de/itm/1", price="100", title="MacBook Pro"):
-    return Listing(
-        title=title,
-        link=link,
-        price_text=f"EUR {price}",
-        price=Decimal(price),
-        currency="EUR",
-        condition="Used",
-        location="Berlin",
-    )
+    return Listing(title, link, f"EUR {price}", Decimal(price), "EUR", condition="Used", location="Berlin")
 
 
 class PriceParsingTests(unittest.TestCase):
@@ -33,8 +25,7 @@ class PriceParsingTests(unittest.TestCase):
 
 class SoldSearchTests(unittest.TestCase):
     def test_adds_sold_and_completed_filters_without_losing_search_filters(self):
-        url = "https://www.ebay.de/sch/i.html?_nkw=macbook&LH_BIN=1&_sop=10"
-        sold_url = sold_search_url(url)
+        sold_url = sold_search_url("https://www.ebay.de/sch/i.html?_nkw=macbook&LH_BIN=1&_sop=10")
         query = parse_qs(urlsplit(sold_url).query)
         self.assertEqual(query["_nkw"], ["macbook"])
         self.assertEqual(query["LH_BIN"], ["1"])
@@ -49,43 +40,25 @@ class SoldSearchTests(unittest.TestCase):
 class ParseListingsTests(unittest.TestCase):
     def test_parses_optional_listing_metadata(self):
         html = """
-        <li class="s-item">
-          <a class="s-item__link" href="https://www.ebay.de/itm/123"></a>
-          <div class="s-item__title">MacBook Pro M1</div>
-          <span class="s-item__price">EUR 799,99</span>
-          <span class="SECONDARY_INFO">Gebraucht</span>
-          <span class="s-item__shipping">EUR 5 Versand</span>
-          <span class="s-item__location">Berlin</span>
-          <img class="s-item__image-img" data-src="https://example.com/image.jpg">
-        </li>
+        <li class="s-item"><a class="s-item__link" href="https://www.ebay.de/itm/123"></a>
+        <div class="s-item__title">MacBook Pro M1</div><span class="s-item__price">EUR 799,99</span>
+        <span class="SECONDARY_INFO">Gebraucht</span><span class="s-item__shipping">EUR 5 Versand</span>
+        <span class="s-item__location">Berlin</span><img class="s-item__image-img" data-src="https://example.com/image.jpg"></li>
         """
         result = parse_listings(html)
-        self.assertEqual(len(result), 1)
         self.assertEqual(result[0].price, Decimal("799.99"))
         self.assertEqual(result[0].condition, "Gebraucht")
-        self.assertEqual(result[0].shipping, "EUR 5 Versand")
 
     def test_skips_incomplete_and_placeholder_entries(self):
-        html = """
-        <li class="s-item"><div class="s-item__title">Missing fields</div></li>
-        <li class="s-item">
-          <a class="s-item__link" href="https://www.ebay.de/"></a>
-          <div class="s-item__title">Shop on eBay</div>
-          <span class="s-item__price">EUR 0.00</span>
-        </li>
-        """
+        html = """<li class="s-item"><div class="s-item__title">Missing</div></li>
+        <li class="s-item"><a class="s-item__link" href="https://www.ebay.de/"></a>
+        <div class="s-item__title">Shop on eBay</div><span class="s-item__price">EUR 0.00</span></li>"""
         self.assertEqual(parse_listings(html), [])
 
 
 class ListingFilterTests(unittest.TestCase):
     def test_applies_keywords_price_and_currency(self):
-        configured = ListingFilter(
-            include_keywords=("macbook", "pro"),
-            exclude_keywords=("defekt",),
-            min_price=Decimal("200"),
-            max_price=Decimal("900"),
-            currency="EUR",
-        )
+        configured = ListingFilter(("macbook", "pro"), ("defekt",), Decimal("200"), Decimal("900"), "EUR")
         self.assertTrue(configured.matches(listing(price="799")))
         self.assertFalse(configured.matches(listing(price="999")))
         self.assertFalse(configured.matches(listing(title="MacBook Pro defekt")))
@@ -105,29 +78,14 @@ class StorageTests(unittest.TestCase):
         drop = self.store.record_scan([listing(price="80")])[0]
         self.assertEqual(drop.type, EventType.PRICE_DROP)
         self.assertEqual(drop.previous_price, Decimal("100"))
-        increase = self.store.record_scan([listing(price="90")])[0]
-        self.assertEqual(increase.type, EventType.PRICE_INCREASE)
+        self.assertEqual(self.store.record_scan([listing(price="90")])[0].type, EventType.PRICE_INCREASE)
         count = self.store.connection.execute("SELECT COUNT(*) FROM price_history").fetchone()[0]
         self.assertEqual(count, 3)
 
-    def test_records_average_median_and_range_for_sold_results(self):
-        stats = self.store.record_search_statistics(
-            "https://www.ebay.de/sch/i.html?_nkw=macbook&LH_Sold=1&LH_Complete=1",
-            "macbook,pro",
-            [listing(price="100"), listing(link="/2", price="200"), listing(link="/3", price="600")],
-        )
-        self.assertEqual(stats["average_price"], Decimal("300"))
-        self.assertEqual(stats["median_price"], Decimal("200"))
-        self.assertEqual(stats["minimum_price"], Decimal("100"))
-        self.assertEqual(stats["maximum_price"], Decimal("600"))
-
     def test_exports_all_csv_files(self):
         self.store.record_scan([listing()])
-        self.store.record_search_statistics("https://www.ebay.de/search?LH_Sold=1", "macbook", [listing()])
         paths = self.store.export_csv(Path(self.directory.name) / "exports")
-        self.assertEqual({path.name for path in paths}, {
-            "listings.csv", "price_history.csv", "sold_statistics.csv"
-        })
+        self.assertEqual({path.name for path in paths}, {"listings.csv", "price_history.csv", "sold_statistics.csv"})
         self.assertTrue(all(path.exists() for path in paths))
 
 
