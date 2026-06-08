@@ -1,6 +1,6 @@
 # Advanced eBay Monitor
 
-A persistent eBay search and price monitor with SQLite history, CSV exports, filters and Discord alerts.
+A persistent eBay search and price monitor with SQLite history, CSV exports, filters, market statistics and Discord alerts.
 
 > The monitor reads eBay's public HTML. eBay can change the page structure or block automated/cloud traffic. Use a reasonable interval and follow eBay's terms and policies.
 
@@ -10,14 +10,20 @@ A persistent eBay search and price monitor with SQLite history, CSV exports, fil
 - Store every listing in SQLite
 - Track first seen, last seen, active status and price history
 - Detect new listings, price drops and price increases
-- Export current listings and complete price history to CSV
+- Calculate average asking price, median, minimum and maximum per search URL and keyword filter
+- Export current listings, price history and market statistics to CSV
 - Include and exclude keywords
 - Minimum/maximum price and currency filters
 - Capture condition, shipping, location and image when available
 - Rich Discord alerts with old price and percentage change
+- Optional Discord market-summary messages
 - Safe first scan without notification spam
 - One-shot mode for cron, Task Scheduler and debugging
 - Python 3.10 and 3.12 tests
+
+## Important price-statistics note
+
+The normal active-listing search page shows asking prices. Therefore the calculated value is the **average asking price**, not a confirmed completed-sale price. For a real average sale price, the configured eBay URL must itself point to sold/completed listings where that filter is available.
 
 ## Installation
 
@@ -60,42 +66,36 @@ PowerShell uses `$env:NAME = 'value'` for the same variables.
 | `CURRENCY` | empty | `EUR`, `USD` or `GBP` |
 | `NOTIFY_EXISTING` | `false` | Notify for matching items on the first scan |
 | `NOTIFY_PRICE_INCREASES` | `false` | Notify when a known item's price rises |
+| `NOTIFY_STATISTICS` | `false` | Send average/median/range summary after every scan |
 | `LOG_LEVEL` | `INFO` | Python log level |
 
-Keyword matching is case-insensitive and checks title, condition and location. Shipping is stored separately and is not included in `MIN_PRICE`/`MAX_PRICE`.
+Keyword matching is case-insensitive and checks title, condition and location. Statistics are calculated after all configured filters, so they represent the selected URL and keywords. Shipping is stored separately and is not included in prices.
 
 ## Commands
 
-Run continuously:
-
 ```bash
-python monitor.py
-```
-
-Run exactly one scan:
-
-```bash
-python monitor.py --once
-```
-
-Export an existing database without fetching eBay:
-
-```bash
-python monitor.py --export
+python monitor.py           # continuous monitoring
+python monitor.py --once    # exactly one scan
+python monitor.py --export  # export the existing database without fetching eBay
 ```
 
 The export creates:
 
 - `listings.csv`: latest state of each known listing
 - `price_history.csv`: every observed initial price and price change
+- `search_statistics.csv`: average, median, minimum, maximum and count per search scan
 
 ## Database
 
-`listings` stores the current state and whether an item was present in the latest scan. `price_history` receives a row when an item is first discovered or its parsed price changes. Prices are stored as exact decimal strings to avoid floating-point rounding errors.
+- `listings` stores the current state and whether an item was present in the latest scan.
+- `price_history` receives a row when an item is discovered or its parsed price changes.
+- `search_statistics` stores one market snapshot per URL and scan, identified by its keyword filter.
+
+Prices are stored as exact decimal strings to avoid floating-point rounding errors.
 
 ## Operational notes
 
-- Prefer eBay search URLs with the desired category, condition, location and buying-format filters already applied.
+- Prefer eBay search URLs with category, condition, location, buying-format and, when desired, sold-item filters already applied.
 - Keep the interval at five minutes or longer for normal use.
 - Back up the SQLite file if long-term price history matters.
 - A cloud host may receive HTTP 403, 429, 500 or 503 even when the same URL works from a home connection.
