@@ -1,34 +1,20 @@
-# Advanced eBay Monitor
+# Advanced eBay Market Monitor
 
-A persistent eBay monitor with SQLite history, CSV exports, filters, sold-price statistics and Discord alerts.
+A persistent eBay monitor with a local web dashboard, database-backed search profiles, robust sold-price analytics, deal scoring and demand estimates.
 
-> The monitor reads eBay's public HTML. eBay can change the page structure or block automated/cloud traffic. Use a reasonable interval and follow eBay's terms and policies.
+## Highlights
 
-## Features
+- Browser-based configuration instead of per-search environment variables
+- Multiple independent profiles with URLs, keywords, exclusions and price ranges
+- Separate active and sold/completed searches
+- Robust sold-price median and average using IQR plus MAD outlier filtering
+- Deal score comparing each active price with the filtered sold median
+- Sales-per-month estimate, sell-through rate, demand level and estimated days to sell
+- SQLite history and CSV exports
+- Dashboard charts for sold-price and demand trends
+- Active listing price history API
 
-- Monitor one or multiple active eBay search URLs
-- Automatically run a separate sold/completed search for each configured URL
-- Calculate average sold price, sold-price median, minimum, maximum and result count
-- Store listings and price history in SQLite
-- Detect new active listings, price drops and price increases
-- Export listings, price history and sold statistics to CSV
-- Include/exclude keywords, minimum/maximum price and currency filters
-- Capture condition, shipping, location and image when available
-- Rich Discord alerts and optional sold-market summaries
-- Safe first scan, one-shot mode and export-only mode
-
-## How sold prices work
-
-For each configured active search URL, the monitor creates a second URL with:
-
-- `LH_Sold=1`
-- `LH_Complete=1`
-
-Only results returned by that sold/completed search are used for average sold price, median and range. Active listings are used only for new-listing and price-change monitoring. Sold results are not inserted into the active-listing history.
-
-The shown value is the public sold price displayed by eBay. It may not reveal a privately negotiated Best Offer amount when eBay hides that final amount.
-
-## Installation
+## Install
 
 ```bash
 python -m venv .venv
@@ -36,70 +22,73 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Quick start
+## Dashboard setup
+
+Start the web interface:
 
 ```bash
-export EBAY_URL='https://www.ebay.de/sch/i.html?_nkw=macbook&LH_BIN=1'
-export DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...'
-export INCLUDE_KEYWORDS='macbook,pro'
-export EXCLUDE_KEYWORDS='defekt,ersatzteile'
-export MIN_PRICE='200'
-export MAX_PRICE='900'
-export CURRENCY='EUR'
-export CSV_DIRECTORY='exports'
-export NOTIFY_STATISTICS='true'
-python monitor.py
+python dashboard.py
 ```
 
-PowerShell uses `$env:NAME = 'value'` for the same variables.
+Open `http://127.0.0.1:5000`, create one or more profiles and configure:
 
-## Configuration
+- active eBay search URL
+- required keywords
+- excluded keywords such as `defekt,zubehoer,ersatzteile`
+- minimum and maximum price
+- currency
+- sold-history window in days
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `EBAY_URL` | required | One active eBay search URL |
-| `EBAY_URLS` | empty | Multiple active URLs separated by `|`; overrides `EBAY_URL` |
-| `DISCORD_WEBHOOK_URL` | empty | Optional Discord webhook |
-| `DATABASE_PATH` | `ebay_monitor.db` | SQLite database location |
-| `CSV_DIRECTORY` | empty | Export CSV files after every successful scan |
-| `CHECK_INTERVAL_SECONDS` | `300` | Poll interval, minimum 30 seconds |
-| `INCLUDE_KEYWORDS` | empty | Comma-separated words; every word must match |
-| `EXCLUDE_KEYWORDS` | empty | Comma-separated words; any match rejects the result |
-| `MIN_PRICE` | empty | Minimum active and sold result price |
-| `MAX_PRICE` | empty | Maximum active and sold result price |
-| `CURRENCY` | empty | `EUR`, `USD` or `GBP` |
-| `NOTIFY_EXISTING` | `false` | Notify for active items on the first scan |
-| `NOTIFY_PRICE_INCREASES` | `false` | Notify when a known active item's price rises |
-| `NOTIFY_STATISTICS` | `false` | Send sold average/median/range after every scan |
-| `LOG_LEVEL` | `INFO` | Python log level |
-
-Keyword matching is case-insensitive and checks title, condition and location. Sold statistics are calculated after these filters. Shipping is stored separately and is not included in sold prices.
-
-## Commands
+Run all enabled profiles once:
 
 ```bash
-python monitor.py           # continuous monitoring
-python monitor.py --once    # one active scan plus one sold-statistics scan
-python monitor.py --export  # export the existing database
+python profile_monitor.py --once
+```
+
+Run continuously using the default five-minute interval:
+
+```bash
+python profile_monitor.py
+```
+
+Keep the dashboard running in a second terminal to view updated charts and deals.
+
+## Analytics
+
+For every profile the scanner derives a sold search by adding `LH_Sold=1` and `LH_Complete=1`. Sold prices are filtered in two stages:
+
+1. Interquartile range fences remove extreme distribution tails.
+2. Median absolute deviation removes values far from the robust center.
+
+Small samples below four prices remain untouched. The dashboard reports how many values were excluded.
+
+### Deal score
+
+A score of `50` means the active price equals the filtered sold median. Prices below the median score above 50; prices above it score below 50. Scores are capped between 0 and 100.
+
+### Demand and sale duration
+
+`sales/month = accepted sold results * 30 / sold-history days`
+
+The sell-through indicator compares estimated monthly sales with active supply. Estimated sale duration divides active supply by monthly sales. These are market estimates, not guarantees; eBay can limit historical sold-result depth.
+
+## Data
+
+The default database is `ebay_monitor.db`. Set `DATABASE_PATH` to use another location. `CHECK_INTERVAL_SECONDS` controls the profile scanner interval and must be at least 30 seconds.
+
+```bash
+python monitor.py --export
 ```
 
 Exports:
 
-- `listings.csv`: latest active state of every known listing
-- `price_history.csv`: observed active-listing price changes
-- `sold_statistics.csv`: sold average, median, range and count per URL/keyword scan
+- `listings.csv`
+- `price_history.csv`
+- `sold_statistics.csv`
 
-## Database
+## Limitations
 
-- `listings`: current active-listing state
-- `price_history`: initial and changed active prices
-- `search_statistics`: snapshots calculated exclusively from sold/completed results
-
-Prices use exact decimal strings to avoid floating-point rounding errors.
-
-## Operational notes
-
-- Keep the interval at five minutes or longer for normal use.
-- Back up the SQLite database if long-term history matters.
-- Cloud hosts may receive HTTP 403, 429, 500 or 503 while a home connection works.
-- eBay HTML and sold-search behavior can change, requiring selector or query updates.
+- eBay may hide the final negotiated Best Offer amount.
+- Public HTML and query behavior can change.
+- Cloud IP addresses may receive HTTP 403, 429, 500 or 503.
+- Demand and sales-per-month are estimates based on visible sold results in the selected window.
