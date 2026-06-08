@@ -5,6 +5,7 @@ from pathlib import Path
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 from profiles import SearchProfile
+from proxy import ProfileProxyStore
 from storage import MonitorStore
 
 
@@ -17,20 +18,18 @@ def create_app(database_path: str | Path | None = None) -> Flask:
 
     @app.get("/")
     def index():
-        profile_id = request.args.get("profile", type=int)
         with store() as database:
-            data = database.dashboard(profile_id)
+            data = database.dashboard(request.args.get("profile", type=int))
         return render_template("dashboard.html", **data)
 
     @app.route("/profiles/new", methods=["GET", "POST"])
     @app.route("/profiles/<int:profile_id>", methods=["GET", "POST"])
     def profile_form(profile_id=None):
-        with store() as database:
+        with store() as database, ProfileProxyStore(app.config["DATABASE_PATH"]) as proxies:
             current = database.profile(profile_id) if profile_id else None
             if request.method == "POST":
                 profile = SearchProfile(
-                    id=profile_id,
-                    name=request.form["name"].strip(),
+                    id=profile_id, name=request.form["name"].strip(),
                     ebay_url=request.form["ebay_url"].strip(),
                     include_keywords=request.form.get("include_keywords", "").strip(),
                     exclude_keywords=request.form.get("exclude_keywords", "").strip(),
@@ -41,26 +40,27 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     enabled=request.form.get("enabled") == "on",
                 )
                 saved_id = database.save_profile(profile)
+                proxies.set(saved_id, request.form.get("proxy_url"))
                 return redirect(url_for("index", profile=saved_id))
-        return render_template("profile.html", profile=current)
+            proxy_url = proxies.get(profile_id) if profile_id else None
+        return render_template("profile.html", profile=current, proxy_url=proxy_url)
 
     @app.post("/profiles/<int:profile_id>/delete")
     def delete_profile(profile_id):
-        with store() as database:
+        with store() as database, ProfileProxyStore(app.config["DATABASE_PATH"]) as proxies:
+            proxies.delete(profile_id)
             database.delete_profile(profile_id)
         return redirect(url_for("index"))
 
     @app.get("/api/profiles/<int:profile_id>/trend")
     def trend(profile_id):
         with store() as database:
-            data = database.dashboard(profile_id)["trend"]
-        return jsonify(data)
+            return jsonify(database.dashboard(profile_id)["trend"])
 
     @app.get("/api/price-history")
     def price_history():
         with store() as database:
-            data = database.price_history(request.args["link"])
-        return jsonify(data)
+            return jsonify(database.price_history(request.args["link"]))
 
     return app
 
