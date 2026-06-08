@@ -17,5 +17,5 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install -r requirements.txt
-      - run: python -m compileall -q monitor.py tests
+      - run: python -m compileall -q monitor.py profile_monitor.py dashboard.py models.py profiles.py analytics.py filters.py storage.py tests
       - run: python -m unittest discover -s tests -v

@@ -1,52 +1,138 @@
+import tempfile
 import unittest
+from decimal import Decimal
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
-from monitor import Listing, find_new_listings, parse_listings, validate_url
+from filters import ListingFilter, parse_price
+from marketplaces import (
+    KLEINANZEIGEN,
+    VINTED,
+    marketplace_for_url,
+    parse_kleinanzeigen_listings,
+    parse_vinted_listings,
+)
+from models import EventType, Listing
+from monitor import parse_listings, sold_search_url, validate_url
+from storage import MonitorStore
+
+
+def listing(link="https://www.ebay.de/itm/1", price="100", title="MacBook Pro"):
+    return Listing(title, link, f"EUR {price}", Decimal(price), "EUR", condition="Used", location="Berlin")
+
+
+class PriceParsingTests(unittest.TestCase):
+    def test_parses_german_and_us_price_formats(self):
+        self.assertEqual(parse_price("EUR 1.299,99"), (Decimal("1299.99"), "EUR"))
+        self.assertEqual(parse_price("US $1,299.99"), (Decimal("1299.99"), "USD"))
+
+    def test_returns_none_for_unparseable_price(self):
+        self.assertEqual(parse_price("Price unavailable"), (None, None))
+
+
+class SoldSearchTests(unittest.TestCase):
+    def test_adds_sold_and_completed_filters_without_losing_search_filters(self):
+        sold_url = sold_search_url("https://www.ebay.de/sch/i.html?_nkw=macbook&LH_BIN=1&_sop=10")
+        query = parse_qs(urlsplit(sold_url).query)
+        self.assertEqual(query["_nkw"], ["macbook"])
+        self.assertEqual(query["LH_BIN"], ["1"])
+        self.assertEqual(query["LH_Sold"], ["1"])
+        self.assertEqual(query["LH_Complete"], ["1"])
+
+    def test_replaces_existing_sold_filter_values(self):
+        sold_url = sold_search_url("https://www.ebay.de/sch/i.html?_nkw=test&LH_Sold=0")
+        self.assertEqual(parse_qs(urlsplit(sold_url).query)["LH_Sold"], ["1"])
 
 
 class ParseListingsTests(unittest.TestCase):
-    def test_parses_complete_listing_and_skips_incomplete_entries(self):
+    def test_parses_optional_listing_metadata(self):
         html = """
-        <ul>
-          <li class="s-item">
-            <a class="s-item__link" href="https://www.ebay.de/itm/123"></a>
-            <div class="s-item__title">Example laptop</div>
-            <span class="s-item__price">EUR 99.00</span>
-            <img class="s-item__image-img" data-src="https://example.com/image.jpg">
-          </li>
-          <li class="s-item"><div class="s-item__title">Missing fields</div></li>
-        </ul>
+        <li class="s-item"><a class="s-item__link" href="https://www.ebay.de/itm/123"></a>
+        <div class="s-item__title">MacBook Pro M1</div><span class="s-item__price">EUR 799,99</span>
+        <span class="SECONDARY_INFO">Gebraucht</span><span class="s-item__shipping">EUR 5 Versand</span>
+        <span class="s-item__location">Berlin</span><img class="s-item__image-img" data-src="https://example.com/image.jpg"></li>
         """
+        result = parse_listings(html)
+        self.assertEqual(result[0].price, Decimal("799.99"))
+        self.assertEqual(result[0].condition, "Gebraucht")
 
-        self.assertEqual(
-            parse_listings(html),
-            [
-                Listing(
-                    title="Example laptop",
-                    link="https://www.ebay.de/itm/123",
-                    price="EUR 99.00",
-                    image_url="https://example.com/image.jpg",
-                )
-            ],
-        )
-
-    def test_skips_ebay_placeholder_listing(self):
-        html = """
-        <li class="s-item">
-          <a class="s-item__link" href="https://www.ebay.de/"></a>
-          <div class="s-item__title">Shop on eBay</div>
-          <span class="s-item__price">EUR 0.00</span>
-        </li>
-        """
-
+    def test_skips_incomplete_and_placeholder_entries(self):
+        html = """<li class="s-item"><div class="s-item__title">Missing</div></li>
+        <li class="s-item"><a class="s-item__link" href="https://www.ebay.de/"></a>
+        <div class="s-item__title">Shop on eBay</div><span class="s-item__price">EUR 0.00</span></li>"""
         self.assertEqual(parse_listings(html), [])
 
+    def test_parses_kleinanzeigen_listing(self):
+        html = """
+        <article class="aditem">
+          <div class="aditem-image"><img src="https://img.example/item.jpg"></div>
+          <div class="aditem-main--top--left">10115 Berlin</div>
+          <a class="ellipsis" href="/s-anzeige/macbook/123">MacBook Air M2</a>
+          <p class="aditem-main--middle--price-shipping--price">750 €</p>
+          <div class="aditem-main--bottom">Versand möglich</div>
+        </article>
+        """
+        result = parse_kleinanzeigen_listings(html)
+        self.assertEqual(result[0].link, "https://www.kleinanzeigen.de/s-anzeige/macbook/123")
+        self.assertEqual(result[0].price, Decimal("750"))
+        self.assertEqual(result[0].location, "10115 Berlin")
 
-class ChangeDetectionTests(unittest.TestCase):
-    def test_returns_only_unseen_links(self):
-        old = Listing("Old", "https://www.ebay.de/itm/1", "EUR 1")
-        new = Listing("New", "https://www.ebay.de/itm/2", "EUR 2")
+    def test_parses_vinted_listing(self):
+        html = """
+        <div class="new-item-box__container">
+          <a href="https://www.vinted.de/items/123-macbook"></a>
+          <p data-testid="product-item-id-123--description-title">MacBook Pro</p>
+          <p data-testid="product-item-id-123--description-subtitle">Sehr gut</p>
+          <p data-testid="product-item-id-123--price-text">250,00 €</p>
+          <img data-testid="product-item-id-123--image--img" src="https://img.example/item.webp">
+        </div>
+        """
+        result = parse_vinted_listings(html)
+        self.assertEqual(result[0].price, Decimal("250.00"))
+        self.assertEqual(result[0].condition, "Sehr gut")
 
-        self.assertEqual(find_new_listings([old, new], {old.link}), [new])
+
+class MarketplaceTests(unittest.TestCase):
+    def test_detects_supported_marketplaces(self):
+        self.assertIs(marketplace_for_url("https://www.kleinanzeigen.de/s-test/k0"), KLEINANZEIGEN)
+        self.assertIs(marketplace_for_url("https://www.vinted.de/catalog"), VINTED)
+
+    def test_rejects_unknown_marketplace(self):
+        with self.assertRaises(ValueError):
+            marketplace_for_url("https://example.com/search")
+
+
+class ListingFilterTests(unittest.TestCase):
+    def test_applies_keywords_price_and_currency(self):
+        configured = ListingFilter(("macbook", "pro"), ("defekt",), Decimal("200"), Decimal("900"), "EUR")
+        self.assertTrue(configured.matches(listing(price="799")))
+        self.assertFalse(configured.matches(listing(price="999")))
+        self.assertFalse(configured.matches(listing(title="MacBook Pro defekt")))
+
+
+class StorageTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.store = MonitorStore(Path(self.directory.name) / "monitor.db")
+
+    def tearDown(self):
+        self.store.close()
+        self.directory.cleanup()
+
+    def test_detects_new_listing_and_price_changes(self):
+        self.assertEqual(self.store.record_scan([listing()])[0].type, EventType.NEW)
+        drop = self.store.record_scan([listing(price="80")])[0]
+        self.assertEqual(drop.type, EventType.PRICE_DROP)
+        self.assertEqual(drop.previous_price, Decimal("100"))
+        self.assertEqual(self.store.record_scan([listing(price="90")])[0].type, EventType.PRICE_INCREASE)
+        count = self.store.connection.execute("SELECT COUNT(*) FROM price_history").fetchone()[0]
+        self.assertEqual(count, 3)
+
+    def test_exports_all_csv_files(self):
+        self.store.record_scan([listing()])
+        paths = self.store.export_csv(Path(self.directory.name) / "exports")
+        self.assertEqual({path.name for path in paths}, {"listings.csv", "price_history.csv", "sold_statistics.csv"})
+        self.assertTrue(all(path.exists() for path in paths))
 
 
 class UrlValidationTests(unittest.TestCase):

@@ -1,51 +1,95 @@
-# eBay Product Monitor
+# Advanced Marketplace Monitor
 
-Monitor an eBay search page and send newly appearing listings to a Discord webhook.
+A persistent eBay, Kleinanzeigen and Vinted monitor with a local web dashboard, database-backed search profiles, price history, filters and per-profile proxy support. eBay profiles additionally provide robust sold-price analytics, deal scoring and demand estimates.
 
-> This project uses eBay's public HTML, which can change without notice. Keep the request interval reasonable and follow eBay's terms and policies.
+## Highlights
 
-## Requirements
+- Browser-based configuration and multiple independent profiles
+- HTTP, HTTPS, SOCKS5 and SOCKS5h proxy support per profile
+- Active searches for eBay, Kleinanzeigen and Vinted
+- Separate sold/completed searches for eBay
+- IQR plus MAD outlier filtering
+- Deal scores relative to the robust sold median
+- Sales/month, sell-through, demand and estimated days to sell
+- SQLite history, CSV exports and trend charts
 
-- Python 3.10 or newer
-- A Discord webhook URL
-- An eBay search URL
-
-## Setup
+## Install
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+python -m playwright install chromium
 ```
 
-Configure the monitor with environment variables. Do not commit webhook URLs to Git.
-
-macOS/Linux:
+## Start
 
 ```bash
-export EBAY_URL='https://www.ebay.de/sch/i.html?_nkw=macbook'
-export DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...'
-python monitor.py
+python dashboard.py
 ```
 
-PowerShell:
+Open `http://127.0.0.1:5000`, create profiles and optionally configure a proxy. Scan once or continuously:
 
-```powershell
-$env:EBAY_URL = 'https://www.ebay.de/sch/i.html?_nkw=macbook'
-$env:DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/...'
-python monitor.py
+```bash
+python profile_monitor.py --once
+python profile_monitor.py
 ```
 
-## Options
+Set `BROWSER_FETCH=true` to load marketplace pages through Chromium's native
+TLS and HTTP/2 stack:
 
-- `CHECK_INTERVAL_SECONDS`: Delay between scans. Default: `300`; minimum: `30`.
-- `NOTIFY_EXISTING`: Set to `true` to notify for all results on the first scan. Default: `false`.
-- `LOG_LEVEL`: Python logging level. Default: `INFO`.
+```bash
+BROWSER_FETCH=true python profile_monitor.py --once
+```
 
-By default, the first scan establishes the known listings without sending a large batch of notifications. Later scans notify only for newly appearing listing links.
+This uses the profile's configured proxy when present. Chromium identifies
+itself honestly; the monitor does not patch browser fingerprints or bypass
+site challenges.
 
-## Notes
+## Proxy support
 
-- Use eBay's filters and sorting options in the search URL.
-- A missing title, link, price, or image no longer crashes the monitor.
-- Temporary eBay or Discord network failures are logged and retried on the next scan.
+Accepted proxy URL formats:
+
+```text
+http://host:8080
+https://host:8443
+http://username:password@host:8080
+socks5://host:1080
+socks5h://username:password@host:1080
+```
+
+Use `socks5h` when DNS lookups should also go through the proxy. The configured proxy handles both HTTP and HTTPS marketplace requests for that profile. Leave the field empty for a direct connection.
+
+Credentials are stored locally in SQLite. Restrict access to the database and never commit it. Logs mask credentials, for example `socks5h://***:***@host:1080`.
+
+## Profile options
+
+Each profile has its own search URL, required/excluded keywords, price range, currency, sold-history window, optional proxy and enabled state.
+
+## Analytics
+
+For eBay profiles, the scanner adds `LH_Sold=1` and `LH_Complete=1` for sold-price analysis. IQR fences and median absolute deviation remove extreme accessory, broken-item and price outliers. Samples below four prices remain untouched.
+
+A Deal Score of `50` equals the sold median. Lower active prices score higher. Demand uses visible sold results per month compared with active supply; estimated sale duration is an estimate, not a guarantee.
+
+## Data and exports
+
+The default database is `ebay_monitor.db`. Change it with `DATABASE_PATH`. `CHECK_INTERVAL_SECONDS` controls scanning and must be at least 30 seconds.
+
+```bash
+python monitor.py --export
+```
+
+Exports: `listings.csv`, `price_history.csv`, and `sold_statistics.csv`.
+
+## Limitations
+
+- **Known issue:** eBay support is currently partial. Depending on the IP,
+  region and request volume, eBay search pages may return HTTP 403 or 429.
+  Other configured marketplaces continue scanning when this happens.
+- eBay may hide final Best Offer amounts.
+- Public HTML and sold-query behavior can change.
+- Proxy quality and legality are the operator's responsibility.
+- eBay may block datacenter or heavily reused proxy IPs.
+- Demand estimates depend on the visible sold-result window.
+- Kleinanzeigen and Vinted have no equivalent public sold-results search, so sold-price and demand analytics are eBay-only.

@@ -1,0 +1,112 @@
+import os
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+from flask import Flask, jsonify, redirect, render_template, request, url_for
+
+from controller import MonitorController
+from profiles import SearchProfile
+from proxy import ProfileProxyStore, redact_proxy_url
+from storage import MonitorStore
+
+
+def create_app(database_path: str | Path | None = None) -> Flask:
+    app = Flask(__name__)
+    app.config["DATABASE_PATH"] = str(database_path or os.getenv("DATABASE_PATH", "ebay_monitor.db"))
+    app.extensions["monitor_controller"] = MonitorController(
+        app.config["DATABASE_PATH"], int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
+    )
+
+    def store():
+        return MonitorStore(app.config["DATABASE_PATH"])
+
+    @app.get("/")
+    def index():
+        with store() as database:
+            data = database.dashboard(request.args.get("profile", type=int))
+        return render_template(
+            "dashboard.html",
+            monitor_status=app.extensions["monitor_controller"].status(),
+            **data,
+        )
+
+    @app.post("/monitor/scan")
+    def monitor_scan():
+        app.extensions["monitor_controller"].scan_once()
+        return redirect(request.referrer or url_for("index"))
+
+    @app.post("/monitor/start")
+    def monitor_start():
+        app.extensions["monitor_controller"].start()
+        return redirect(request.referrer or url_for("index"))
+
+    @app.post("/monitor/stop")
+    def monitor_stop():
+        app.extensions["monitor_controller"].stop()
+        return redirect(request.referrer or url_for("index"))
+
+    @app.get("/api/monitor/status")
+    def monitor_status():
+        return jsonify(app.extensions["monitor_controller"].status())
+
+    @app.route("/profiles/new", methods=["GET", "POST"])
+    @app.route("/profiles/<int:profile_id>", methods=["GET", "POST"])
+    def profile_form(profile_id=None):
+        with store() as database, ProfileProxyStore(app.config["DATABASE_PATH"]) as proxies:
+            current = database.profile(profile_id) if profile_id else None
+            if request.method == "POST":
+                profile = SearchProfile(
+                    id=profile_id, name=request.form["name"].strip(),
+                    ebay_url=request.form["ebay_url"].strip(),
+                    include_keywords=request.form.get("include_keywords", "").strip(),
+                    exclude_keywords=request.form.get("exclude_keywords", "").strip(),
+                    min_price=_decimal(request.form.get("min_price")),
+                    max_price=_decimal(request.form.get("max_price")),
+                    currency=request.form.get("currency") or None,
+                    sold_window_days=max(1, int(request.form.get("sold_window_days", "90"))),
+                    enabled=request.form.get("enabled") == "on",
+                )
+                saved_id = database.save_profile(profile)
+                new_proxy = request.form.get("proxy_url", "").strip()
+                if new_proxy:
+                    proxies.set(saved_id, new_proxy)
+                elif request.form.get("clear_proxy") == "on":
+                    proxies.delete(saved_id)
+                return redirect(url_for("index", profile=saved_id))
+            existing_proxy = proxies.get(profile_id) if profile_id else None
+        return render_template(
+            "profile.html", profile=current, proxy_configured=bool(existing_proxy),
+            proxy_display=redact_proxy_url(existing_proxy),
+        )
+
+    @app.post("/profiles/<int:profile_id>/delete")
+    def delete_profile(profile_id):
+        with store() as database, ProfileProxyStore(app.config["DATABASE_PATH"]) as proxies:
+            proxies.delete(profile_id)
+            database.delete_profile(profile_id)
+        return redirect(url_for("index"))
+
+    @app.get("/api/profiles/<int:profile_id>/trend")
+    def trend(profile_id):
+        with store() as database:
+            return jsonify(database.dashboard(profile_id)["trend"])
+
+    @app.get("/api/price-history")
+    def price_history():
+        with store() as database:
+            return jsonify(database.price_history(request.args["link"]))
+
+    return app
+
+
+def _decimal(value: str | None) -> Decimal | None:
+    if not value or not value.strip():
+        return None
+    try:
+        return Decimal(value.strip().replace(",", "."))
+    except InvalidOperation as error:
+        raise ValueError(f"Invalid decimal value: {value}") from error
+
+
+if __name__ == "__main__":
+    create_app().run(host=os.getenv("DASHBOARD_HOST", "127.0.0.1"), port=int(os.getenv("DASHBOARD_PORT", "5000")), debug=False)
