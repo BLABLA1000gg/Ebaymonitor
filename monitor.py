@@ -10,7 +10,9 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 import requests
 from bs4 import BeautifulSoup
 
+from browser_fetch import BrowserFetcher
 from filters import ListingFilter, parse_csv_words, parse_price
+from marketplaces import fetch_marketplace_listings, marketplace_for_url
 from models import EventType, Listing, ListingEvent
 from storage import MonitorStore
 
@@ -91,15 +93,15 @@ def sold_search_url(search_url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
-def fetch_listings(session: requests.Session, ebay_url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> list[Listing]:
-    response = session.get(ebay_url, headers=HEADERS, timeout=timeout)
-    if response.status_code in {403, 429, 500, 503}:
-        raise requests.HTTPError(
-            f"eBay rejected the request with HTTP {response.status_code}; the IP may be rate-limited or blocked",
-            response=response,
-        )
-    response.raise_for_status()
-    return parse_listings(response.text)
+def fetch_listings(
+    session: requests.Session,
+    url: str,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    browser_fetcher=None,
+) -> list[Listing]:
+    return fetch_marketplace_listings(
+        session, url, HEADERS, timeout, parse_listings, browser_fetcher
+    )
 
 
 def event_should_notify(event: ListingEvent, config: Config, initial_scan: bool) -> bool:
@@ -160,29 +162,43 @@ def send_statistics_to_discord(session: requests.Session, webhook_url: str, stat
 
 
 def scan_once(session: requests.Session, store: MonitorStore, config: Config, initial_scan: bool) -> tuple[int, int]:
+    browser_context = BrowserFetcher() if bool_env("BROWSER_FETCH") else None
+    if browser_context:
+        browser_context.__enter__()
     by_link: dict[str, Listing] = {}
-    keyword_signature = ",".join(config.listing_filter.include_keywords)
-    for ebay_url in config.ebay_urls:
-        active_listings = [
-            listing for listing in fetch_listings(session, ebay_url)
-            if config.listing_filter.matches(listing)
-        ]
-        for listing in active_listings:
-            by_link[listing.link] = listing
+    try:
+        keyword_signature = ",".join(config.listing_filter.include_keywords)
+        for ebay_url in config.ebay_urls:
+            marketplace = marketplace_for_url(ebay_url)
+            active_listings = [
+                listing for listing in fetch_listings(
+                    session, ebay_url, browser_fetcher=browser_context
+                )
+                if config.listing_filter.matches(listing)
+            ]
+            for listing in active_listings:
+                by_link[listing.link] = listing
 
-        sold_url = sold_search_url(ebay_url)
-        sold_listings = [
-            listing for listing in fetch_listings(session, sold_url)
-            if config.listing_filter.matches(listing)
-        ]
-        stats = store.record_search_statistics(sold_url, keyword_signature, sold_listings)
-        LOGGER.info(
-            "Sold statistics: %s results, average=%s, median=%s, min=%s, max=%s",
-            stats["listing_count"], stats["average_price"], stats["median_price"],
-            stats["minimum_price"], stats["maximum_price"],
-        )
-        if config.notify_statistics and config.webhook_url:
-            send_statistics_to_discord(session, config.webhook_url, stats)
+            if not marketplace.supports_sold_search:
+                continue
+            sold_url = sold_search_url(ebay_url)
+            sold_listings = [
+                listing for listing in fetch_listings(
+                    session, sold_url, browser_fetcher=browser_context
+                )
+                if config.listing_filter.matches(listing)
+            ]
+            stats = store.record_search_statistics(sold_url, keyword_signature, sold_listings)
+            LOGGER.info(
+                "Sold statistics: %s results, average=%s, median=%s, min=%s, max=%s",
+                stats["listing_count"], stats["average_price"], stats["median_price"],
+                stats["minimum_price"], stats["maximum_price"],
+            )
+            if config.notify_statistics and config.webhook_url:
+                send_statistics_to_discord(session, config.webhook_url, stats)
+    finally:
+        if browser_context:
+            browser_context.__exit__(None, None, None)
 
     events = store.record_scan(list(by_link.values()))
     notified = 0
@@ -220,7 +236,8 @@ def load_config() -> Config:
     raw_urls = os.environ.get("EBAY_URLS") or os.environ.get("EBAY_URL")
     if not raw_urls:
         raise ValueError("Set EBAY_URL or EBAY_URLS")
-    ebay_urls = tuple(validate_url("EBAY_URL", value.strip(), ("ebay.com", "ebay.de")) for value in raw_urls.split("|") if value.strip())
+    supported_hosts = ("ebay.com", "ebay.de", "kleinanzeigen.de", "vinted.de")
+    ebay_urls = tuple(validate_url("EBAY_URL", value.strip(), supported_hosts) for value in raw_urls.split("|") if value.strip())
     webhook = os.getenv("DISCORD_WEBHOOK_URL")
     if webhook:
         webhook = validate_url("DISCORD_WEBHOOK_URL", webhook, ("discord.com", "discordapp.com"))

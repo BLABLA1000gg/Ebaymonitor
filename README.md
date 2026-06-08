@@ -1,12 +1,13 @@
-# Advanced eBay Market Monitor
+# Advanced Marketplace Monitor
 
-A persistent eBay monitor with a local web dashboard, database-backed search profiles, robust sold-price analytics, deal scoring, demand estimates and per-profile proxy support.
+A persistent eBay, Kleinanzeigen and Vinted monitor with a local web dashboard, database-backed search profiles, price history, filters and per-profile proxy support. eBay profiles additionally provide robust sold-price analytics, deal scoring and demand estimates.
 
 ## Highlights
 
 - Browser-based configuration and multiple independent profiles
 - HTTP, HTTPS, SOCKS5 and SOCKS5h proxy support per profile
-- Separate active and sold/completed searches
+- Active searches for eBay, Kleinanzeigen and Vinted
+- Separate sold/completed searches for eBay
 - IQR plus MAD outlier filtering
 - Deal scores relative to the robust sold median
 - Sales/month, sell-through, demand and estimated days to sell
@@ -18,6 +19,7 @@ A persistent eBay monitor with a local web dashboard, database-backed search pro
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+python -m playwright install chromium
 ```
 
 ## Start
@@ -33,6 +35,17 @@ python profile_monitor.py --once
 python profile_monitor.py
 ```
 
+Set `BROWSER_FETCH=true` to load marketplace pages through Chromium's native
+TLS and HTTP/2 stack:
+
+```bash
+BROWSER_FETCH=true python profile_monitor.py --once
+```
+
+This uses the profile's configured proxy when present. Chromium identifies
+itself honestly; the monitor does not patch browser fingerprints or bypass
+site challenges.
+
 ## Proxy support
 
 Accepted proxy URL formats:
@@ -45,7 +58,7 @@ socks5://host:1080
 socks5h://username:password@host:1080
 ```
 
-Use `socks5h` when DNS lookups should also go through the proxy. The configured proxy handles both HTTP and HTTPS eBay requests for that profile. Leave the field empty for a direct connection.
+Use `socks5h` when DNS lookups should also go through the proxy. The configured proxy handles both HTTP and HTTPS marketplace requests for that profile. Leave the field empty for a direct connection.
 
 Credentials are stored locally in SQLite. Restrict access to the database and never commit it. Logs mask credentials, for example `socks5h://***:***@host:1080`.
 
@@ -55,7 +68,7 @@ Each profile has its own search URL, required/excluded keywords, price range, cu
 
 ## Analytics
 
-The scanner adds `LH_Sold=1` and `LH_Complete=1` for sold-price analysis. IQR fences and median absolute deviation remove extreme accessory, broken-item and price outliers. Samples below four prices remain untouched.
+For eBay profiles, the scanner adds `LH_Sold=1` and `LH_Complete=1` for sold-price analysis. IQR fences and median absolute deviation remove extreme accessory, broken-item and price outliers. Samples below four prices remain untouched.
 
 A Deal Score of `50` equals the sold median. Lower active prices score higher. Demand uses visible sold results per month compared with active supply; estimated sale duration is an estimate, not a guarantee.
 
@@ -71,8 +84,12 @@ Exports: `listings.csv`, `price_history.csv`, and `sold_statistics.csv`.
 
 ## Limitations
 
+- **Known issue:** eBay support is currently partial. Depending on the IP,
+  region and request volume, eBay search pages may return HTTP 403 or 429.
+  Other configured marketplaces continue scanning when this happens.
 - eBay may hide final Best Offer amounts.
 - Public HTML and sold-query behavior can change.
 - Proxy quality and legality are the operator's responsibility.
 - eBay may block datacenter or heavily reused proxy IPs.
 - Demand estimates depend on the visible sold-result window.
+- Kleinanzeigen and Vinted have no equivalent public sold-results search, so sold-price and demand analytics are eBay-only.

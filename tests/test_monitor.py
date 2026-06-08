@@ -5,6 +5,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from filters import ListingFilter, parse_price
+from marketplaces import (
+    KLEINANZEIGEN,
+    VINTED,
+    marketplace_for_url,
+    parse_kleinanzeigen_listings,
+    parse_vinted_listings,
+)
 from models import EventType, Listing
 from monitor import parse_listings, sold_search_url, validate_url
 from storage import MonitorStore
@@ -54,6 +61,45 @@ class ParseListingsTests(unittest.TestCase):
         <li class="s-item"><a class="s-item__link" href="https://www.ebay.de/"></a>
         <div class="s-item__title">Shop on eBay</div><span class="s-item__price">EUR 0.00</span></li>"""
         self.assertEqual(parse_listings(html), [])
+
+    def test_parses_kleinanzeigen_listing(self):
+        html = """
+        <article class="aditem">
+          <div class="aditem-image"><img src="https://img.example/item.jpg"></div>
+          <div class="aditem-main--top--left">10115 Berlin</div>
+          <a class="ellipsis" href="/s-anzeige/macbook/123">MacBook Air M2</a>
+          <p class="aditem-main--middle--price-shipping--price">750 €</p>
+          <div class="aditem-main--bottom">Versand möglich</div>
+        </article>
+        """
+        result = parse_kleinanzeigen_listings(html)
+        self.assertEqual(result[0].link, "https://www.kleinanzeigen.de/s-anzeige/macbook/123")
+        self.assertEqual(result[0].price, Decimal("750"))
+        self.assertEqual(result[0].location, "10115 Berlin")
+
+    def test_parses_vinted_listing(self):
+        html = """
+        <div class="new-item-box__container">
+          <a href="https://www.vinted.de/items/123-macbook"></a>
+          <p data-testid="product-item-id-123--description-title">MacBook Pro</p>
+          <p data-testid="product-item-id-123--description-subtitle">Sehr gut</p>
+          <p data-testid="product-item-id-123--price-text">250,00 €</p>
+          <img data-testid="product-item-id-123--image--img" src="https://img.example/item.webp">
+        </div>
+        """
+        result = parse_vinted_listings(html)
+        self.assertEqual(result[0].price, Decimal("250.00"))
+        self.assertEqual(result[0].condition, "Sehr gut")
+
+
+class MarketplaceTests(unittest.TestCase):
+    def test_detects_supported_marketplaces(self):
+        self.assertIs(marketplace_for_url("https://www.kleinanzeigen.de/s-test/k0"), KLEINANZEIGEN)
+        self.assertIs(marketplace_for_url("https://www.vinted.de/catalog"), VINTED)
+
+    def test_rejects_unknown_marketplace(self):
+        with self.assertRaises(ValueError):
+            marketplace_for_url("https://example.com/search")
 
 
 class ListingFilterTests(unittest.TestCase):

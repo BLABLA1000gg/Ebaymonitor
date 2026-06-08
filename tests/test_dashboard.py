@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from dashboard import create_app
+from controller import MonitorController
 from profiles import SearchProfile
 from storage import MonitorStore
 
@@ -46,6 +47,30 @@ class ProfileStorageTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 302)
         self.assertIn(b"ThinkPads", client.get("/").data)
+        self.assertIn(b"Scan now", client.get("/").data)
+        status = client.get("/api/monitor/status")
+        self.assertEqual(status.status_code, 200)
+        self.assertFalse(status.get_json()["running"])
+
+    def test_monitor_control_routes(self):
+        app = create_app(self.path)
+        app.config["TESTING"] = True
+        controller = app.extensions["monitor_controller"]
+        calls = []
+        controller.scan_once = lambda: calls.append("scan") or True
+        controller.start = lambda: calls.append("start") or True
+        controller.stop = lambda: calls.append("stop") or True
+        client = app.test_client()
+        self.assertEqual(client.post("/monitor/scan").status_code, 302)
+        self.assertEqual(client.post("/monitor/start").status_code, 302)
+        self.assertEqual(client.post("/monitor/stop").status_code, 302)
+        self.assertEqual(calls, ["scan", "start", "stop"])
+
+    def test_controller_reports_partial_scan_errors(self):
+        controller = MonitorController(self.path)
+        status = controller.status()
+        self.assertFalse(status["running"])
+        self.assertFalse(status["scanning"])
 
 
 if __name__ == "__main__":

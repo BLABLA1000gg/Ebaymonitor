@@ -4,6 +4,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
+from controller import MonitorController
 from profiles import SearchProfile
 from proxy import ProfileProxyStore, redact_proxy_url
 from storage import MonitorStore
@@ -12,6 +13,9 @@ from storage import MonitorStore
 def create_app(database_path: str | Path | None = None) -> Flask:
     app = Flask(__name__)
     app.config["DATABASE_PATH"] = str(database_path or os.getenv("DATABASE_PATH", "ebay_monitor.db"))
+    app.extensions["monitor_controller"] = MonitorController(
+        app.config["DATABASE_PATH"], int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
+    )
 
     def store():
         return MonitorStore(app.config["DATABASE_PATH"])
@@ -20,7 +24,30 @@ def create_app(database_path: str | Path | None = None) -> Flask:
     def index():
         with store() as database:
             data = database.dashboard(request.args.get("profile", type=int))
-        return render_template("dashboard.html", **data)
+        return render_template(
+            "dashboard.html",
+            monitor_status=app.extensions["monitor_controller"].status(),
+            **data,
+        )
+
+    @app.post("/monitor/scan")
+    def monitor_scan():
+        app.extensions["monitor_controller"].scan_once()
+        return redirect(request.referrer or url_for("index"))
+
+    @app.post("/monitor/start")
+    def monitor_start():
+        app.extensions["monitor_controller"].start()
+        return redirect(request.referrer or url_for("index"))
+
+    @app.post("/monitor/stop")
+    def monitor_stop():
+        app.extensions["monitor_controller"].stop()
+        return redirect(request.referrer or url_for("index"))
+
+    @app.get("/api/monitor/status")
+    def monitor_status():
+        return jsonify(app.extensions["monitor_controller"].status())
 
     @app.route("/profiles/new", methods=["GET", "POST"])
     @app.route("/profiles/<int:profile_id>", methods=["GET", "POST"])

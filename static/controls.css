@@ -1,0 +1,75 @@
+.monitor-controls {
+  align-items: center;
+  background: linear-gradient(145deg, #151e2c, #101722);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  margin-bottom: 18px;
+  padding: 16px 19px;
+}
+
+.monitor-controls > div:first-child {
+  padding-left: 22px;
+  position: relative;
+}
+
+.monitor-controls p {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.status-dot {
+  background: #667085;
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px #66708518;
+  height: 11px;
+  left: 0;
+  position: absolute;
+  top: 4px;
+  width: 11px;
+}
+
+.status-dot.running {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px #55d6be20;
+}
+
+.control-actions {
+  display: flex;
+  gap: 9px;
+}
+
+.control-actions form {
+  margin: 0;
+}
+
+.secondary {
+  background: #253044;
+  color: var(--text);
+}
+
+.stop {
+  background: #ff6b7a;
+  color: #21070b;
+}
+
+.edit-link {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 9px 13px;
+}
+
+@media (max-width: 900px) {
+  .monitor-controls {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .control-actions {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+}
