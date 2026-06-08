@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -83,6 +83,14 @@ def parse_listings(html: str) -> list[Listing]:
     return listings
 
 
+def sold_search_url(search_url: str) -> str:
+    parts = urlsplit(search_url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query["LH_Sold"] = "1"
+    query["LH_Complete"] = "1"
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
 def fetch_listings(session: requests.Session, ebay_url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> list[Listing]:
     response = session.get(ebay_url, headers=HEADERS, timeout=timeout)
     if response.status_code in {403, 429, 500, 503}:
@@ -130,17 +138,19 @@ def send_to_discord(session: requests.Session, webhook_url: str, event: ListingE
 
 def send_statistics_to_discord(session: requests.Session, webhook_url: str, stats: dict, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> None:
     currency = stats["currency"] or ""
+
     def money(value):
         return f"{value:.2f} {currency}" if value is not None else "n/a"
+
     embed = {
-        "title": "eBay search market summary",
+        "title": "eBay sold-price summary",
         "url": stats["search_url"],
         "color": 0x9B59B6,
-        "description": f"Keywords: {stats['keyword_filter'] or 'none'}",
+        "description": f"Sold/completed results for keywords: {stats['keyword_filter'] or 'none'}",
         "fields": [
-            {"name": "Average asking price", "value": money(stats["average_price"]), "inline": True},
-            {"name": "Median", "value": money(stats["median_price"]), "inline": True},
-            {"name": "Listings", "value": str(stats["listing_count"]), "inline": True},
+            {"name": "Average sold price", "value": money(stats["average_price"]), "inline": True},
+            {"name": "Median sold price", "value": money(stats["median_price"]), "inline": True},
+            {"name": "Sold results", "value": str(stats["listing_count"]), "inline": True},
             {"name": "Minimum", "value": money(stats["minimum_price"]), "inline": True},
             {"name": "Maximum", "value": money(stats["maximum_price"]), "inline": True},
         ],
@@ -153,21 +163,26 @@ def scan_once(session: requests.Session, store: MonitorStore, config: Config, in
     by_link: dict[str, Listing] = {}
     keyword_signature = ",".join(config.listing_filter.include_keywords)
     for ebay_url in config.ebay_urls:
-        matched = [
-            listing
-            for listing in fetch_listings(session, ebay_url)
+        active_listings = [
+            listing for listing in fetch_listings(session, ebay_url)
             if config.listing_filter.matches(listing)
         ]
-        stats = store.record_search_statistics(ebay_url, keyword_signature, matched)
+        for listing in active_listings:
+            by_link[listing.link] = listing
+
+        sold_url = sold_search_url(ebay_url)
+        sold_listings = [
+            listing for listing in fetch_listings(session, sold_url)
+            if config.listing_filter.matches(listing)
+        ]
+        stats = store.record_search_statistics(sold_url, keyword_signature, sold_listings)
         LOGGER.info(
-            "Search statistics: %s listings, average=%s, median=%s, min=%s, max=%s",
+            "Sold statistics: %s results, average=%s, median=%s, min=%s, max=%s",
             stats["listing_count"], stats["average_price"], stats["median_price"],
             stats["minimum_price"], stats["maximum_price"],
         )
         if config.notify_statistics and config.webhook_url:
             send_statistics_to_discord(session, config.webhook_url, stats)
-        for listing in matched:
-            by_link[listing.link] = listing
 
     events = store.record_scan(list(by_link.values()))
     notified = 0
@@ -249,7 +264,7 @@ def run_monitor(config: Config, once: bool = False) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Advanced eBay listing and price monitor")
+    parser = argparse.ArgumentParser(description="Advanced eBay listing and sold-price monitor")
     parser.add_argument("--once", action="store_true", help="Run one scan and exit")
     parser.add_argument("--export", action="store_true", help="Export the database to CSV and exit")
     args = parser.parse_args()
