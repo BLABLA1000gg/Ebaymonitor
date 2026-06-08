@@ -1,29 +1,32 @@
 # Advanced eBay Monitor
 
-A persistent eBay search and price monitor with SQLite history, CSV exports, filters, market statistics and Discord alerts.
+A persistent eBay monitor with SQLite history, CSV exports, filters, sold-price statistics and Discord alerts.
 
 > The monitor reads eBay's public HTML. eBay can change the page structure or block automated/cloud traffic. Use a reasonable interval and follow eBay's terms and policies.
 
 ## Features
 
-- Monitor one or multiple eBay search URLs
-- Store every listing in SQLite
-- Track first seen, last seen, active status and price history
-- Detect new listings, price drops and price increases
-- Calculate average asking price, median, minimum and maximum per search URL and keyword filter
-- Export current listings, price history and market statistics to CSV
-- Include and exclude keywords
-- Minimum/maximum price and currency filters
+- Monitor one or multiple active eBay search URLs
+- Automatically run a separate sold/completed search for each configured URL
+- Calculate average sold price, sold-price median, minimum, maximum and result count
+- Store listings and price history in SQLite
+- Detect new active listings, price drops and price increases
+- Export listings, price history and sold statistics to CSV
+- Include/exclude keywords, minimum/maximum price and currency filters
 - Capture condition, shipping, location and image when available
-- Rich Discord alerts with old price and percentage change
-- Optional Discord market-summary messages
-- Safe first scan without notification spam
-- One-shot mode for cron, Task Scheduler and debugging
-- Python 3.10 and 3.12 tests
+- Rich Discord alerts and optional sold-market summaries
+- Safe first scan, one-shot mode and export-only mode
 
-## Important price-statistics note
+## How sold prices work
 
-The normal active-listing search page shows asking prices. Therefore the calculated value is the **average asking price**, not a confirmed completed-sale price. For a real average sale price, the configured eBay URL must itself point to sold/completed listings where that filter is available.
+For each configured active search URL, the monitor creates a second URL with:
+
+- `LH_Sold=1`
+- `LH_Complete=1`
+
+Only results returned by that sold/completed search are used for average sold price, median and range. Active listings are used only for new-listing and price-change monitoring. Sold results are not inserted into the active-listing history.
+
+The shown value is the public sold price displayed by eBay. It may not reveal a privately negotiated Best Offer amount when eBay hides that final amount.
 
 ## Installation
 
@@ -44,6 +47,7 @@ export MIN_PRICE='200'
 export MAX_PRICE='900'
 export CURRENCY='EUR'
 export CSV_DIRECTORY='exports'
+export NOTIFY_STATISTICS='true'
 python monitor.py
 ```
 
@@ -53,50 +57,49 @@ PowerShell uses `$env:NAME = 'value'` for the same variables.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `EBAY_URL` | required | One eBay search URL |
-| `EBAY_URLS` | empty | Multiple URLs separated by `|`; overrides `EBAY_URL` |
+| `EBAY_URL` | required | One active eBay search URL |
+| `EBAY_URLS` | empty | Multiple active URLs separated by `|`; overrides `EBAY_URL` |
 | `DISCORD_WEBHOOK_URL` | empty | Optional Discord webhook |
 | `DATABASE_PATH` | `ebay_monitor.db` | SQLite database location |
 | `CSV_DIRECTORY` | empty | Export CSV files after every successful scan |
 | `CHECK_INTERVAL_SECONDS` | `300` | Poll interval, minimum 30 seconds |
 | `INCLUDE_KEYWORDS` | empty | Comma-separated words; every word must match |
-| `EXCLUDE_KEYWORDS` | empty | Comma-separated words; any match rejects the listing |
-| `MIN_PRICE` | empty | Minimum parsed item price |
-| `MAX_PRICE` | empty | Maximum parsed item price |
+| `EXCLUDE_KEYWORDS` | empty | Comma-separated words; any match rejects the result |
+| `MIN_PRICE` | empty | Minimum active and sold result price |
+| `MAX_PRICE` | empty | Maximum active and sold result price |
 | `CURRENCY` | empty | `EUR`, `USD` or `GBP` |
-| `NOTIFY_EXISTING` | `false` | Notify for matching items on the first scan |
-| `NOTIFY_PRICE_INCREASES` | `false` | Notify when a known item's price rises |
-| `NOTIFY_STATISTICS` | `false` | Send average/median/range summary after every scan |
+| `NOTIFY_EXISTING` | `false` | Notify for active items on the first scan |
+| `NOTIFY_PRICE_INCREASES` | `false` | Notify when a known active item's price rises |
+| `NOTIFY_STATISTICS` | `false` | Send sold average/median/range after every scan |
 | `LOG_LEVEL` | `INFO` | Python log level |
 
-Keyword matching is case-insensitive and checks title, condition and location. Statistics are calculated after all configured filters, so they represent the selected URL and keywords. Shipping is stored separately and is not included in prices.
+Keyword matching is case-insensitive and checks title, condition and location. Sold statistics are calculated after these filters. Shipping is stored separately and is not included in sold prices.
 
 ## Commands
 
 ```bash
 python monitor.py           # continuous monitoring
-python monitor.py --once    # exactly one scan
-python monitor.py --export  # export the existing database without fetching eBay
+python monitor.py --once    # one active scan plus one sold-statistics scan
+python monitor.py --export  # export the existing database
 ```
 
-The export creates:
+Exports:
 
-- `listings.csv`: latest state of each known listing
-- `price_history.csv`: every observed initial price and price change
-- `search_statistics.csv`: average, median, minimum, maximum and count per search scan
+- `listings.csv`: latest active state of every known listing
+- `price_history.csv`: observed active-listing price changes
+- `sold_statistics.csv`: sold average, median, range and count per URL/keyword scan
 
 ## Database
 
-- `listings` stores the current state and whether an item was present in the latest scan.
-- `price_history` receives a row when an item is discovered or its parsed price changes.
-- `search_statistics` stores one market snapshot per URL and scan, identified by its keyword filter.
+- `listings`: current active-listing state
+- `price_history`: initial and changed active prices
+- `search_statistics`: snapshots calculated exclusively from sold/completed results
 
-Prices are stored as exact decimal strings to avoid floating-point rounding errors.
+Prices use exact decimal strings to avoid floating-point rounding errors.
 
 ## Operational notes
 
-- Prefer eBay search URLs with category, condition, location, buying-format and, when desired, sold-item filters already applied.
 - Keep the interval at five minutes or longer for normal use.
-- Back up the SQLite file if long-term price history matters.
-- A cloud host may receive HTTP 403, 429, 500 or 503 even when the same URL works from a home connection.
-- HTML selectors are covered by fixture-style tests but may need updates after an eBay redesign.
+- Back up the SQLite database if long-term history matters.
+- Cloud hosts may receive HTTP 403, 429, 500 or 503 while a home connection works.
+- eBay HTML and sold-search behavior can change, requiring selector or query updates.
