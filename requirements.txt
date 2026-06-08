@@ -1,2 +1,2 @@
-pip install requests
-pip install beautifulsoup4
+beautifulsoup4>=4.12,<5
+requests>=2.31,<3
