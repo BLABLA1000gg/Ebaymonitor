@@ -20,9 +20,9 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install -r requirements.txt
-      - name: Fetch and parse a live eBay page
+      - name: Fetch and parse a live eBay search page
         env:
-          EBAY_SMOKE_URL: https://www.ebay.de/b/Apple-MacBook/111422/bn_12463578
+          EBAY_SMOKE_URL: https://www.ebay.de/sch/i.html?_nkw=macbook&LH_BIN=1&_sop=10
         run: |
           python - <<'PY'
           import os
