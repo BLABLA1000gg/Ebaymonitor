@@ -2,10 +2,11 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from filters import ListingFilter, parse_price
 from models import EventType, Listing
-from monitor import parse_listings, validate_url
+from monitor import parse_listings, sold_search_url, validate_url
 from storage import MonitorStore
 
 
@@ -28,6 +29,21 @@ class PriceParsingTests(unittest.TestCase):
 
     def test_returns_none_for_unparseable_price(self):
         self.assertEqual(parse_price("Price unavailable"), (None, None))
+
+
+class SoldSearchTests(unittest.TestCase):
+    def test_adds_sold_and_completed_filters_without_losing_search_filters(self):
+        url = "https://www.ebay.de/sch/i.html?_nkw=macbook&LH_BIN=1&_sop=10"
+        sold_url = sold_search_url(url)
+        query = parse_qs(urlsplit(sold_url).query)
+        self.assertEqual(query["_nkw"], ["macbook"])
+        self.assertEqual(query["LH_BIN"], ["1"])
+        self.assertEqual(query["LH_Sold"], ["1"])
+        self.assertEqual(query["LH_Complete"], ["1"])
+
+    def test_replaces_existing_sold_filter_values(self):
+        sold_url = sold_search_url("https://www.ebay.de/sch/i.html?_nkw=test&LH_Sold=0")
+        self.assertEqual(parse_qs(urlsplit(sold_url).query)["LH_Sold"], ["1"])
 
 
 class ParseListingsTests(unittest.TestCase):
@@ -94,9 +110,9 @@ class StorageTests(unittest.TestCase):
         count = self.store.connection.execute("SELECT COUNT(*) FROM price_history").fetchone()[0]
         self.assertEqual(count, 3)
 
-    def test_records_average_median_and_range_per_search(self):
+    def test_records_average_median_and_range_for_sold_results(self):
         stats = self.store.record_search_statistics(
-            "https://www.ebay.de/sch/i.html?_nkw=macbook",
+            "https://www.ebay.de/sch/i.html?_nkw=macbook&LH_Sold=1&LH_Complete=1",
             "macbook,pro",
             [listing(price="100"), listing(link="/2", price="200"), listing(link="/3", price="600")],
         )
@@ -107,10 +123,10 @@ class StorageTests(unittest.TestCase):
 
     def test_exports_all_csv_files(self):
         self.store.record_scan([listing()])
-        self.store.record_search_statistics("https://www.ebay.de/search", "macbook", [listing()])
+        self.store.record_search_statistics("https://www.ebay.de/search?LH_Sold=1", "macbook", [listing()])
         paths = self.store.export_csv(Path(self.directory.name) / "exports")
         self.assertEqual({path.name for path in paths}, {
-            "listings.csv", "price_history.csv", "search_statistics.csv"
+            "listings.csv", "price_history.csv", "sold_statistics.csv"
         })
         self.assertTrue(all(path.exists() for path in paths))
 
