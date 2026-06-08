@@ -1,36 +1,51 @@
-eBay Product Monitor
-This script monitors  eBay url listings and sends it to a discord webhooks when new products are listed.
+# eBay Product Monitor
 
-Features:
-Monitors eBay for specific listings based on a given URL.
-Sends a nwebhooks when new products are detected.
-Uses BeautifulSoup for web scraping.
-Prerequisites:
-Python 3
-pip install requests
-pip install beautifulsoup4
-Setup:
+Monitor an eBay search page and send newly appearing listings to a Discord webhook.
 
+> This project uses eBay's public HTML, which can change without notice. Keep the request interval reasonable and follow eBay's terms and policies.
 
-Copy code
+## Requirements
+
+- Python 3.10 or newer
+- A Discord webhook URL
+- An eBay search URL
+
+## Setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-Replace 'YOUR_WEBHOOK_URL_HERE' in the script with your Discord webhook URL.
+```
 
-Replace 'YOUR_EBAY_URL_HERE' in the script with the desired eBay search URL.
+Configure the monitor with environment variables. Do not commit webhook URLs to Git.
 
-Run the script:
+macOS/Linux:
 
-The script is set to check eBay every 5 minutes. Adjust the sleep time if needed.
-Use responsibly and avoid sending excessive requests to eBay.
-Contributing:
-If you'd like to contribute, please fork the repository and use a feature branch. Pull requests are warmly welcome.
+```bash
+export EBAY_URL='https://www.ebay.de/sch/i.html?_nkw=macbook'
+export DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...'
+python monitor.py
+```
 
+PowerShell:
 
-You can input a link and it will monitor the link for new products
-for example i use this link to find cheap macbooks to flip them: "https://www.ebay.de/sch/i.html?_from=R40&_nkw=Macbook&_sacat=0&_sop=2&LH_BIN=1&LH_ItemCondition=7000%7C3000&_blrs=recall_filtering&_udlo=20&rt=nc&LH_PrefLoc=1&_ipg=240"
+```powershell
+$env:EBAY_URL = 'https://www.ebay.de/sch/i.html?_nkw=macbook'
+$env:DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/...'
+python monitor.py
+```
 
-Important note:
-use Basic words like Macbook,Notebook,Computer and so on...
-Sort for the lowest price first.
-click on only show "buy now".
-for the best expirence scroll to the button of the page an pick 240 or more articels on each page.
+## Options
+
+- `CHECK_INTERVAL_SECONDS`: Delay between scans. Default: `300`; minimum: `30`.
+- `NOTIFY_EXISTING`: Set to `true` to notify for all results on the first scan. Default: `false`.
+- `LOG_LEVEL`: Python logging level. Default: `INFO`.
+
+By default, the first scan establishes the known listings without sending a large batch of notifications. Later scans notify only for newly appearing listing links.
+
+## Notes
+
+- Use eBay's filters and sorting options in the search URL.
+- A missing title, link, price, or image no longer crashes the monitor.
+- Temporary eBay or Discord network failures are logged and retried on the next scan.
