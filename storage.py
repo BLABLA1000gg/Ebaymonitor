@@ -3,6 +3,7 @@ import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from statistics import median
 
 from models import EventType, Listing, ListingEvent
 
@@ -31,8 +32,22 @@ CREATE TABLE IF NOT EXISTS price_history (
     observed_at TEXT NOT NULL,
     FOREIGN KEY(link) REFERENCES listings(link)
 );
+CREATE TABLE IF NOT EXISTS search_statistics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    search_url TEXT NOT NULL,
+    keyword_filter TEXT NOT NULL,
+    currency TEXT,
+    listing_count INTEGER NOT NULL,
+    average_price TEXT,
+    median_price TEXT,
+    minimum_price TEXT,
+    maximum_price TEXT,
+    observed_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_price_history_link_time
 ON price_history(link, observed_at);
+CREATE INDEX IF NOT EXISTS idx_search_statistics_url_time
+ON search_statistics(search_url, observed_at);
 """
 
 
@@ -62,7 +77,11 @@ class MonitorStore:
                 previous = self.connection.execute(
                     "SELECT current_price FROM listings WHERE link = ?", (listing.link,)
                 ).fetchone()
-                previous_price = Decimal(previous["current_price"]) if previous and previous["current_price"] is not None else None
+                previous_price = (
+                    Decimal(previous["current_price"])
+                    if previous and previous["current_price"] is not None
+                    else None
+                )
 
                 if previous is None:
                     event_type = EventType.NEW
@@ -120,21 +139,64 @@ class MonitorStore:
                 self.connection.execute("UPDATE listings SET active = 0")
         return events
 
-    def export_csv(self, directory: str | Path) -> tuple[Path, Path]:
+    def record_search_statistics(
+        self,
+        search_url: str,
+        keyword_filter: str,
+        listings: list[Listing],
+    ) -> dict[str, Decimal | int | str | None]:
+        priced = [listing for listing in listings if listing.price is not None]
+        prices = [listing.price for listing in priced if listing.price is not None]
+        average = sum(prices, Decimal("0")) / len(prices) if prices else None
+        med = Decimal(str(median(prices))) if prices else None
+        minimum = min(prices) if prices else None
+        maximum = max(prices) if prices else None
+        currencies = {listing.currency for listing in priced if listing.currency}
+        currency = currencies.pop() if len(currencies) == 1 else None
+        observed_at = datetime.now(timezone.utc).isoformat()
+
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO search_statistics (
+                    search_url, keyword_filter, currency, listing_count,
+                    average_price, median_price, minimum_price, maximum_price, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    search_url, keyword_filter, currency, len(prices),
+                    str(average) if average is not None else None,
+                    str(med) if med is not None else None,
+                    str(minimum) if minimum is not None else None,
+                    str(maximum) if maximum is not None else None,
+                    observed_at,
+                ),
+            )
+        return {
+            "search_url": search_url,
+            "keyword_filter": keyword_filter,
+            "currency": currency,
+            "listing_count": len(prices),
+            "average_price": average,
+            "median_price": med,
+            "minimum_price": minimum,
+            "maximum_price": maximum,
+        }
+
+    def export_csv(self, directory: str | Path) -> tuple[Path, Path, Path]:
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
         listings_path = target / "listings.csv"
         history_path = target / "price_history.csv"
+        statistics_path = target / "search_statistics.csv"
 
+        self._write_query(listings_path, "SELECT * FROM listings ORDER BY last_seen DESC")
+        self._write_query(history_path, "SELECT * FROM price_history ORDER BY observed_at DESC")
         self._write_query(
-            listings_path,
-            "SELECT * FROM listings ORDER BY last_seen DESC",
+            statistics_path,
+            "SELECT * FROM search_statistics ORDER BY observed_at DESC",
         )
-        self._write_query(
-            history_path,
-            "SELECT * FROM price_history ORDER BY observed_at DESC",
-        )
-        return listings_path, history_path
+        return listings_path, history_path, statistics_path
 
     def _write_query(self, path: Path, query: str) -> None:
         rows = self.connection.execute(query).fetchall()
