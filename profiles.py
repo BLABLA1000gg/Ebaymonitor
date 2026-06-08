@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from filters import ListingFilter, parse_csv_words
+from proxy import validate_proxy_url
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,10 @@ class SearchProfile:
     currency: str | None = None
     sold_window_days: int = 90
     enabled: bool = True
+    proxy_url: str | None = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "proxy_url", validate_proxy_url(self.proxy_url))
 
     @property
     def listing_filter(self) -> ListingFilter:
