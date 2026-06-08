@@ -1,0 +1,49 @@
+name: Live eBay smoke test
+
+on:
+  push:
+    branches: [fix/modernize-monitor-v2]
+
+permissions:
+  contents: write
+
+jobs:
+  smoke:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/modernize-monitor-v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Fetch and parse a live eBay page
+        env:
+          EBAY_SMOKE_URL: https://www.ebay.de/b/Apple-MacBook/111422/bn_12463578
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+          from monitor import fetch_listings
+
+          with requests.Session() as session:
+              listings = fetch_listings(session, os.environ['EBAY_SMOKE_URL'])
+
+          print(f'Parsed {len(listings)} live listings')
+          for listing in listings[:3]:
+              print(f'- {listing.title[:80]} | {listing.price}')
+          if not listings:
+              raise SystemExit('Live eBay response contained no parseable listings')
+          PY
+      - name: Remove temporary smoke workflow
+        if: success()
+        run: |
+          rm .github/workflows/live-ebay-smoke.yml
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add .github/workflows/live-ebay-smoke.yml
+          git commit -m "chore: remove live eBay smoke workflow"
+          git push
