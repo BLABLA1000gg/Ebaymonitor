@@ -67,16 +67,50 @@
     <h2 class="wide section-heading">Arbitrage &amp; KI</h2>
 
     <label class="wide">
-      DeepSeek API Key
-      <input type="password" name="deepseek_api_key"
-             value="{{ s.deepseek_api_key }}"
-             placeholder="sk-...">
+      KI-Provider für Spec-Erkennung
+      <select name="ai_provider" id="ai_provider_select" onchange="toggleKeyFields()">
+        <option value="none"     {% if s.ai_provider == 'none'     %}selected{% endif %}>Kein KI (nur Regex)</option>
+        <option value="nvidia"   {% if s.ai_provider == 'nvidia'   %}selected{% endif %}>NVIDIA NIM — kostenlos (Llama 3.1)</option>
+        <option value="deepseek" {% if s.ai_provider == 'deepseek' %}selected{% endif %}>DeepSeek — günstig</option>
+      </select>
       <span class="hint">
-        Optional. Wenn gesetzt, wird DeepSeek verwendet um aus Listing-Titeln automatisch
-        Speichergröße (GB), Modell und Farbe zu extrahieren — für präzisere Buyback-Preiszuordnung.
-        Key: <a href="https://platform.deepseek.com" target="_blank" style="color:var(--accent)">platform.deepseek.com</a>
+        Regex erkennt GB/Modell in ~95 % der Fälle ohne API-Call.
+        KI wird nur für unklare Titel gebraucht — max. 1 Batch-Call pro Scan.
       </span>
     </label>
+
+    <div id="field-nvidia" style="display:none">
+      <label class="wide">
+        NVIDIA NIM API Key
+        <input type="password" name="nvidia_api_key"
+               value="{{ s.nvidia_api_key }}"
+               placeholder="nvapi-...">
+        <span class="hint">
+          Gratis Credits: <a href="https://build.nvidia.com" target="_blank" style="color:var(--accent)">build.nvidia.com</a>
+        </span>
+      </label>
+    </div>
+
+    <div id="field-deepseek" style="display:none">
+      <label class="wide">
+        DeepSeek API Key
+        <input type="password" name="deepseek_api_key"
+               value="{{ s.deepseek_api_key }}"
+               placeholder="sk-...">
+        <span class="hint">
+          Key: <a href="https://platform.deepseek.com" target="_blank" style="color:var(--accent)">platform.deepseek.com</a>
+        </span>
+      </label>
+    </div>
+
+    <script>
+      function toggleKeyFields() {
+        const v = document.getElementById('ai_provider_select').value;
+        document.getElementById('field-nvidia').style.display   = v === 'nvidia'   ? '' : 'none';
+        document.getElementById('field-deepseek').style.display = v === 'deepseek' ? '' : 'none';
+      }
+      toggleKeyFields();
+    </script>
 
     <h2 class="wide section-heading">Scanning</h2>
 

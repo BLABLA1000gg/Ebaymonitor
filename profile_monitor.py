@@ -144,12 +144,18 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
         LOGGER.warning("%s: No keyword found for dynamic buyback search", profile.name)
         return
 
-    api_key = settings.deepseek_api_key if settings else ""
+    provider = settings.ai_provider if settings else "none"
+    if provider == "nvidia":
+        api_key = settings.nvidia_api_key if settings else ""
+    elif provider == "deepseek":
+        api_key = settings.deepseek_api_key if settings else ""
+    else:
+        api_key = ""
 
     # Extract specs from active listings in one batch call (max 30 listings)
-    # Heuristic runs first; DeepSeek only called for titles without a GB match
+    # Heuristic runs first; LLM only called for titles without a GB match
     sample_titles = [item.title for item in active[:30]]
-    all_specs = extract_specs_batch(sample_titles, api_key=api_key)
+    all_specs = extract_specs_batch(sample_titles, api_key=api_key, provider=provider)
 
     gb_votes: dict[int, int] = {}
     for specs in all_specs:

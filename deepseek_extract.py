@@ -16,8 +16,13 @@ from typing import Sequence
 
 import requests
 
+# DeepSeek
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_MODEL   = "deepseek-chat"
+
+# NVIDIA NIM (OpenAI-compatible)
+NVIDIA_BASE_URL  = "https://integrate.api.nvidia.com/v1"
+NVIDIA_MODEL     = "meta/llama-3.1-8b-instruct"
 
 # ------------------------------------------------------------------ #
 # In-memory cache  (title → specs dict)                              #
@@ -68,12 +73,18 @@ _COLORS = [
 # Public API                                                          #
 # ------------------------------------------------------------------ #
 
-def extract_specs(title: str, description: str = "", api_key: str = "") -> dict:
+def extract_specs(
+    title: str,
+    description: str = "",
+    api_key: str = "",
+    provider: str = "none",
+) -> dict:
     """
     Return {'model': str|None, 'storage_gb': int|None, 'color': str|None}.
 
-    Heuristic runs first; DeepSeek is only called if storage_gb is still
-    unknown AND an api_key is provided.  Results are cached in-process.
+    Heuristic runs first; LLM is only called if storage_gb is still
+    unknown AND an api_key + provider are configured. Results are cached.
+    provider: "none" | "deepseek" | "nvidia"
     """
     key = _cache_key(title)
     if key in _cache:
@@ -81,11 +92,10 @@ def extract_specs(title: str, description: str = "", api_key: str = "") -> dict:
 
     result = _heuristic_extract(title)
 
-    # Only hit DeepSeek for the fields heuristic couldn't fill
-    if api_key and result["storage_gb"] is None:
-        ds = _deepseek_single(title, description, api_key)
-        if ds:
-            result = {**result, **{k: v for k, v in ds.items() if v is not None}}
+    if api_key and provider != "none" and result["storage_gb"] is None:
+        llm = _llm_single(title, description, api_key, provider)
+        if llm:
+            result = {**result, **{k: v for k, v in llm.items() if v is not None}}
 
     _cache[key] = result
     return result
@@ -94,16 +104,18 @@ def extract_specs(title: str, description: str = "", api_key: str = "") -> dict:
 def extract_specs_batch(
     titles: Sequence[str],
     api_key: str = "",
+    provider: str = "none",
 ) -> list[dict]:
     """
     Process many titles efficiently:
     - Return cached results immediately
     - Run heuristic on all uncached titles
-    - Bundle only the *still-ambiguous* titles into ONE DeepSeek call
+    - Bundle only the *still-ambiguous* titles into ONE LLM call
     Returns a list in the same order as `titles`.
+    provider: "none" | "deepseek" | "nvidia"
     """
     results: list[dict | None] = [None] * len(titles)
-    need_ds: list[int] = []   # indices that still need DeepSeek
+    need_llm: list[int] = []
 
     for i, title in enumerate(titles):
         key = _cache_key(title)
@@ -113,16 +125,16 @@ def extract_specs_batch(
         h = _heuristic_extract(title)
         _cache[key] = h
         results[i] = h
-        if h["storage_gb"] is None and api_key:
-            need_ds.append(i)
+        if h["storage_gb"] is None and api_key and provider != "none":
+            need_llm.append(i)
 
     # Batch call — one request for all ambiguous titles
-    if need_ds and api_key:
-        batch_titles = [titles[i] for i in need_ds]
-        batch_results = _deepseek_batch(batch_titles, api_key)
-        for idx, ds in zip(need_ds, batch_results):
-            if ds:
-                merged = {**results[idx], **{k: v for k, v in ds.items() if v is not None}}
+    if need_llm and api_key and provider != "none":
+        batch_titles = [titles[i] for i in need_llm]
+        batch_results = _llm_batch(batch_titles, api_key, provider)
+        for idx, llm in zip(need_llm, batch_results):
+            if llm:
+                merged = {**results[idx], **{k: v for k, v in llm.items() if v is not None}}
                 results[idx] = merged
                 _cache[_cache_key(titles[idx])] = merged
 
@@ -165,21 +177,7 @@ def _heuristic_extract(title: str) -> dict:
 
 
 # ------------------------------------------------------------------ #
-# DeepSeek — single title (fallback when batch not suitable)          #
-# ------------------------------------------------------------------ #
-
-def _deepseek_single(title: str, description: str, api_key: str) -> dict | None:
-    prompt = (
-        "Extract product specs. Return ONLY JSON: "
-        "{\"model\":...,\"storage_gb\":...,\"color\":...}.\n"
-        f"Title: {title}"
-        + (f"\nDesc: {description[:200]}" if description else "")
-    )
-    return _call_deepseek([{"role": "user", "content": prompt}], api_key, max_tokens=60)
-
-
-# ------------------------------------------------------------------ #
-# DeepSeek — batch (ONE call for up to 50 titles)                     #
+# LLM single + batch (supports DeepSeek and NVIDIA NIM)              #
 # ------------------------------------------------------------------ #
 
 _BATCH_SYSTEM = (
@@ -189,20 +187,30 @@ _BATCH_SYSTEM = (
     "Output ONLY the JSON array, no prose."
 )
 
-def _deepseek_batch(titles: list[str], api_key: str) -> list[dict | None]:
+
+def _llm_single(title: str, description: str, api_key: str, provider: str) -> dict | None:
+    prompt = (
+        "Extract product specs. Return ONLY JSON: "
+        '{"model":...,"storage_gb":...,"color":...}.\n'
+        f"Title: {title}"
+        + (f"\nDesc: {description[:200]}" if description else "")
+    )
+    return _call_llm([{"role": "user", "content": prompt}], api_key, provider, max_tokens=60)
+
+
+def _llm_batch(titles: list[str], api_key: str, provider: str) -> list[dict | None]:
     if not titles:
         return []
     numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles[:50]))
-    prompt = f"Titles:\n{numbered}"
-    raw = _call_deepseek(
-        [{"role": "user", "content": prompt}],
+    raw = _call_llm(
+        [{"role": "user", "content": f"Titles:\n{numbered}"}],
         api_key,
+        provider,
         system=_BATCH_SYSTEM,
-        max_tokens=50 * len(titles),
+        max_tokens=60 * len(titles),
     )
     if raw is None:
         return [None] * len(titles)
-    # raw should be a list; if it's a dict it was a single-title response
     if isinstance(raw, dict):
         raw = [raw]
     results: list[dict | None] = []
@@ -215,44 +223,52 @@ def _deepseek_batch(titles: list[str], api_key: str) -> list[dict | None]:
             })
         else:
             results.append(None)
-    # Pad if API returned fewer items
     while len(results) < len(titles):
         results.append(None)
     return results
 
 
-def _call_deepseek(
+def _call_llm(
     messages: list[dict],
     api_key: str,
+    provider: str,
     system: str | None = None,
     max_tokens: int = 80,
 ) -> dict | list | None:
     """
-    Low-level DeepSeek call.  Returns parsed JSON (dict or list) or None on error.
-    Uses temperature=0 for deterministic, cheap output.
+    Universal LLM call — routes to DeepSeek or NVIDIA NIM based on provider.
+    Returns parsed JSON (dict or list) or None on error.
     """
     full_messages = []
     if system:
         full_messages.append({"role": "system", "content": system})
     full_messages.extend(messages)
+
     try:
-        r = requests.post(
-            DEEPSEEK_API_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": DEEPSEEK_MODEL,
-                "messages": full_messages,
-                "max_tokens": max_tokens,
-                "temperature": 0,
-            },
-            timeout=15,
-        )
-        r.raise_for_status()
-        text = r.json()["choices"][0]["message"]["content"].strip()
-        # Strip markdown code fences if present
+        if provider == "nvidia":
+            from openai import OpenAI
+            client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=api_key)
+            resp = client.chat.completions.create(
+                model=NVIDIA_MODEL,
+                messages=full_messages,
+                temperature=0.1,
+                top_p=0.7,
+                max_tokens=max_tokens,
+                stream=False,
+            )
+            text = resp.choices[0].message.content.strip()
+        else:
+            # DeepSeek via requests (no extra lib needed)
+            r = requests.post(
+                DEEPSEEK_API_URL,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": DEEPSEEK_MODEL, "messages": full_messages,
+                      "max_tokens": max_tokens, "temperature": 0},
+                timeout=15,
+            )
+            r.raise_for_status()
+            text = r.json()["choices"][0]["message"]["content"].strip()
+
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
         return json.loads(text)

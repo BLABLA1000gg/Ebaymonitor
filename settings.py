@@ -26,6 +26,8 @@ _DEFAULTS: dict[str, str] = {
     "shipping_cost_eur":      "5.00",
     "ebay_fee_rate":          "0.1235",
     "deepseek_api_key":       "",
+    "nvidia_api_key":         "",
+    "ai_provider":            "none",   # "none" | "deepseek" | "nvidia"
 }
 
 
@@ -40,6 +42,8 @@ class AppSettings:
     shipping_cost_eur: float = 5.00
     ebay_fee_rate: float = 0.1235
     deepseek_api_key: str = ""
+    nvidia_api_key: str = ""
+    ai_provider: str = "none"   # "none" | "deepseek" | "nvidia"
 
 
 class SettingsStore:
@@ -74,6 +78,8 @@ class SettingsStore:
             shipping_cost_eur=float(get("shipping_cost_eur") or 5.0),
             ebay_fee_rate=float(get("ebay_fee_rate") or 0.1235),
             deepseek_api_key=get("deepseek_api_key"),
+            nvidia_api_key=get("nvidia_api_key"),
+            ai_provider=get("ai_provider"),
         )
 
     def save(self, settings: AppSettings) -> None:
@@ -87,6 +93,8 @@ class SettingsStore:
             ("shipping_cost_eur",      str(settings.shipping_cost_eur)),
             ("ebay_fee_rate",          str(settings.ebay_fee_rate)),
             ("deepseek_api_key",       settings.deepseek_api_key),
+            ("nvidia_api_key",         settings.nvidia_api_key),
+            ("ai_provider",            settings.ai_provider),
         ]
         with self._conn:
             self._conn.executemany(

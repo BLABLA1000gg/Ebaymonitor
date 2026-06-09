@@ -79,6 +79,8 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     shipping_cost_eur=max(0.0, float(request.form.get("shipping_cost_eur") or 5.0)),
                     ebay_fee_rate=max(0.0, min(1.0, float(request.form.get("ebay_fee_rate") or 0.1235))),
                     deepseek_api_key=request.form.get("deepseek_api_key", "").strip(),
+                    nvidia_api_key=request.form.get("nvidia_api_key", "").strip(),
+                    ai_provider=request.form.get("ai_provider", "none").strip(),
                 )
                 ss.save(new_settings)
                 # Apply new interval to running controller
