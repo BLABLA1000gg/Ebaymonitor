@@ -4,6 +4,12 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+try:
+    from curl_cffi.requests import Session as CurlSession
+    _CURL_CFFI_AVAILABLE = True
+except ImportError:
+    _CURL_CFFI_AVAILABLE = False
+
 from filters import parse_price
 from models import Listing
 
@@ -89,6 +95,50 @@ def parse_vinted_listings(html: str) -> list[Listing]:
     return listings
 
 
+_EBAY_CURL_SESSION: "CurlSession | None" = None  # type: ignore[type-arg]
+
+_EBAY_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+
+def _fetch_ebay(url: str, headers: dict, timeout: int):
+    """
+    Fetch an eBay URL using curl_cffi which mimics Chrome's TLS fingerprint,
+    bypassing eBay's bot detection (JA3/TLS fingerprinting + header analysis).
+
+    eBay requires session cookies obtained from the homepage before accepting
+    search requests. The curl_cffi session is reused across calls.
+
+    Falls back to plain requests if curl_cffi is not installed.
+    """
+    global _EBAY_CURL_SESSION
+
+    if not _CURL_CFFI_AVAILABLE:
+        # Fallback — likely to get 403 on server/datacenter IPs
+        return requests.get(url, headers=headers, timeout=timeout)
+
+    parsed = urlparse(url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}/"
+
+    if _EBAY_CURL_SESSION is None:
+        _EBAY_CURL_SESSION = CurlSession(impersonate="chrome120")
+        # Seed the session with homepage cookies so eBay accepts search requests
+        _EBAY_CURL_SESSION.get(base_url, headers=_EBAY_HEADERS, timeout=timeout)
+
+    search_headers = _EBAY_HEADERS.copy()
+    search_headers["Sec-Fetch-Site"] = "same-origin"
+    search_headers["Referer"] = base_url
+    return _EBAY_CURL_SESSION.get(url, headers=search_headers, timeout=timeout)
+
+
 def fetch_marketplace_listings(
     session: requests.Session,
     url: str,
@@ -98,15 +148,24 @@ def fetch_marketplace_listings(
     browser_fetcher=None,
 ) -> list[Listing]:
     marketplace = marketplace_for_url(url)
+
     if browser_fetcher:
         response = browser_fetcher.get(url, timeout)
+        response_text = response.text
+    elif marketplace is EBAY:
+        # eBay requires a real browser TLS fingerprint — use curl_cffi
+        response = _fetch_ebay(url, headers, timeout)
         response_text = response.text
     else:
         response = session.get(url, headers=headers, timeout=timeout)
         response_text = response.text
+
     if response.status_code in {403, 429, 500, 503}:
         guidance = (
-            " Use eBay's official Browse API or configure a proxy you are authorized to use."
+            " curl_cffi is installed but the IP may still be blocked."
+            " Try setting BROWSER_FETCH=true or use a residential proxy."
+            if marketplace is EBAY and _CURL_CFFI_AVAILABLE
+            else " Install curl_cffi (pip install curl_cffi) for Chrome TLS impersonation."
             if marketplace is EBAY
             else ""
         )
@@ -115,6 +174,7 @@ def fetch_marketplace_listings(
             f"the IP may be rate-limited or blocked.{guidance}",
             response=response,
         )
+
     if browser_fetcher:
         if response.status_code >= 400:
             raise requests.HTTPError(
@@ -122,6 +182,7 @@ def fetch_marketplace_listings(
             )
     else:
         response.raise_for_status()
+
     if marketplace is KLEINANZEIGEN:
         return parse_kleinanzeigen_listings(response_text)
     if marketplace is VINTED:
