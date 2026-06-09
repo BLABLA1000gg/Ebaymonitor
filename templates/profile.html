@@ -247,7 +247,7 @@
 // Marketplace URL builder                                             //
 // ------------------------------------------------------------------ //
 const MP_URLS = {
-  ebay:   kw => `https://www.ebay.de/sch/i.html?_nkw=${encodeURIComponent(kw)}&_sacat=0`,
+  ebay:   kw => `https://www.ebay.de/sch/i.html?_nkw=${encodeURIComponent(kw)}&_sacat=0&LH_BIN=1`,
   ka:     kw => `https://www.kleinanzeigen.de/s-${encodeURIComponent(kw).replace(/%20/g,'-')}/k0`,
   vinted: kw => `https://www.vinted.de/catalog?search_text=${encodeURIComponent(kw)}`,
 };

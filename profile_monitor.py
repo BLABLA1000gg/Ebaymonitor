@@ -39,7 +39,7 @@ def scan_profiles(
         try:
             proxy_url = proxy_store.get(profile.id)
             # Collect all URLs to scan: primary + extra
-            all_urls = [profile.ebay_url] + (profile.extra_urls or [])
+            all_urls = [_no_auctions(u) for u in [profile.ebay_url] + (profile.extra_urls or [])]
             active_seen: dict[str, object] = {}  # dedup by link
             sold = []
             sold_url = profile.ebay_url
@@ -160,6 +160,14 @@ def scan_profiles(
         )
     events = store.record_scan(list(all_active.values())) if successful_profiles else []
     return len(profiles), len(events)
+
+
+def _no_auctions(url: str) -> str:
+    """Append LH_BIN=1 to eBay URLs to exclude auction listings."""
+    if "ebay.de" in url and "LH_BIN" not in url:
+        sep = "&" if "?" in url else "?"
+        return url + sep + "LH_BIN=1"
+    return url
 
 
 def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wirkaufens_prices):
