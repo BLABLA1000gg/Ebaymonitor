@@ -7,6 +7,7 @@ from pathlib import Path
 
 import concurrent.futures
 import json
+import re
 from decimal import Decimal
 
 import requests
@@ -142,64 +143,124 @@ def scan_profiles(
             while len(assessments) < len(active):
                 assessments.append(default_assessment.copy())
 
+            # ── Model-match guard ────────────────────────────────────────────
+            # Extract required model tokens from the profile name so we can
+            # reject listings that are a completely different device.
+            # E.g. profile "iphone 13 pro" → tokens ["13","pro"]
+            # An "iPhone XS Max" title misses both → rejected.
+            _profile_tokens = re.findall(
+                r'\b(\d+|pro|max|mini|plus|ultra|se|xs|xr)\b',
+                profile.name.lower(),
+            )
+
+            def _title_matches_profile(title: str) -> bool:
+                if not _profile_tokens:
+                    return True
+                tl = title.lower()
+                return all(
+                    re.search(r'\b' + re.escape(t) + r'\b', tl)
+                    for t in _profile_tokens
+                )
+
             # ── Parallel per-listing assessment ─────────────────────────────
             # Each listing is processed in its own thread:
-            #   1. Fetch real description (KA/Vinted page fetch)
-            #   2. Regex hard-block
-            #   3. AI vision assessment (title + description + images)
-            #   4. ROI calculation
-            # Max 6 concurrent workers — limited by NVIDIA API rate limits.
+            #   1. Model-match guard  (reject wrong device)
+            #   2. Fetch real description (KA/Vinted page fetch)
+            #   3. Regex hard-block   (multilingual broken keywords)
+            #   4. AI vision assessment (title + description + 1 image)
+            #   5. Text-only AI fallback when vision unavailable
+            #   6. functional=False or condition=0 → skip
+            #   7. ROI calculation
+            # 3 workers — NVIDIA free tier allows ~3 concurrent requests safely.
 
             def _assess_item(item, text_assess):
                 """Process one listing. Returns (link, extras_dict)."""
+                _skip = {"detected_condition": "Defekt", "worth_it": False,
+                         "condition_profit": None, "condition_roi": None}
                 try:
+                    # ── Guard 0: model mismatch ──────────────────────────────
+                    if not _title_matches_profile(item.title):
+                        LOGGER.info("%s: SKIP (falsches Modell) — %s",
+                                    profile.name, item.title[:60])
+                        return item.link, _skip
+
                     item_desc = getattr(item, "description", "") or ""
 
-                    # Fetch real description for KA/Vinted
-                    if not item_desc and item.link:
+                    # ── Guard 1: fetch real description for KA/Vinted ────────
+                    if item.link:
                         try:
                             if "kleinanzeigen.de" in item.link:
-                                _, item_desc = _fetch_ka_details(item.link)
+                                _, fetched = _fetch_ka_details(item.link)
+                                if fetched:
+                                    item_desc = fetched
                             elif "vinted." in item.link:
-                                _, item_desc = _fetch_vinted_details(item.link)
+                                _, fetched = _fetch_vinted_details(item.link)
+                                if fetched:
+                                    item_desc = fetched
                         except Exception:
                             pass
 
-                    # Layer 1: regex hard-block on title+description
+                    # ── Guard 2: regex hard-block (title + description) ──────
                     raw_cond = detect_condition(item.title, description=item_desc)
                     if raw_cond == COND_BROKEN:
                         LOGGER.info("%s: SKIP (defekt-keywords) — %s",
                                     profile.name, item.title[:60])
-                        return item.link, {"detected_condition": "Defekt", "worth_it": False,
-                                           "condition_profit": None, "condition_roi": None}
+                        return item.link, _skip
 
-                    # Layer 2: AI assessment (vision model sees title+desc+images)
-                    assess = text_assess
+                    # ── Guard 3: AI vision assessment ────────────────────────
+                    # Primary: vision model (title + description + 1 photo)
+                    # Fallback: text-only batch assessment
+                    # If BOTH fail: skip listing (safe default — don't buy blind)
+                    assess = None
                     if api_key and provider == "nvidia":
                         try:
-                            full = ai_assess_listing_full(
+                            assess = ai_assess_listing_full(
                                 title=item.title,
                                 description=item_desc,
                                 image_url=item.image_url,
                                 listing_url=item.link,
                                 api_key=api_key,
                                 provider=provider,
-                                max_images=3,
+                                max_images=1,
                             )
-                            if full:
-                                assess = full
                         except Exception as ve:
-                            LOGGER.warning("%s: AI assessment failed for %s: %s",
+                            LOGGER.warning("%s: vision failed for %s: %s",
                                            profile.name, item.title[:40], ve)
 
-                    # Layer 3: non-functional → skip
-                    if not assess.get("functional", True):
-                        LOGGER.info("%s: SKIP (AI: nicht funktional) — %s",
-                                    profile.name, item.title[:60])
-                        return item.link, {"detected_condition": "Defekt", "worth_it": False,
-                                           "condition_profit": None, "condition_roi": None}
+                        # Fallback: text-only if vision returned None
+                        if assess is None and item_desc:
+                            try:
+                                batch = ai_assess_listing_batch(
+                                    [(item.title, item_desc)],
+                                    api_key=api_key, provider=provider,
+                                )
+                                if batch:
+                                    assess = batch[0]
+                            except Exception:
+                                pass
 
-                    # Condition score: platform field > AI (if worse) > regex
+                    # If AI is available but assessment still failed → skip
+                    if api_key and provider == "nvidia" and assess is None:
+                        LOGGER.info("%s: SKIP (AI nicht verfügbar) — %s",
+                                    profile.name, item.title[:60])
+                        return item.link, _skip
+
+                    # Fall back to text_assess (DeepSeek batch result or default)
+                    if assess is None:
+                        assess = text_assess
+
+                    # ── Guard 4: condition 0 → always non-functional ─────────
+                    if assess.get("condition") == COND_BROKEN:
+                        assess = dict(assess, functional=False)
+
+                    # ── Guard 5: non-functional → skip ───────────────────────
+                    if not assess.get("functional", True):
+                        LOGGER.info("%s: SKIP (nicht funktional) — %s",
+                                    profile.name, item.title[:60])
+                        return item.link, _skip
+
+                    # ── Condition score priority ─────────────────────────────
+                    # Platform field > AI (if more pessimistic) > regex
                     if item.condition:
                         cond_score = detect_condition(item.title, platform_condition=item.condition)
                         ai_cond = assess.get("condition")
@@ -245,11 +306,12 @@ def scan_profiles(
                 except Exception as e:
                     LOGGER.warning("%s: _assess_item error for %s: %s",
                                    profile.name, item.title[:40], e)
+                    # On unexpected crash: never mark as worth-it
                     return item.link, {"detected_condition": "Gut", "worth_it": False,
                                        "condition_profit": None, "condition_roi": None}
 
-            # Run all listings in parallel (max 6 threads — respects NVIDIA rate limit)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+            # 3 workers: safe for NVIDIA free-tier rate limits (avoids 429 errors)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
                 futures = {
                     ex.submit(_assess_item, item, assessments[i]): item
                     for i, item in enumerate(active)
