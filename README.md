@@ -42,9 +42,15 @@ TLS and HTTP/2 stack:
 BROWSER_FETCH=true python profile_monitor.py --once
 ```
 
-This uses the profile's configured proxy when present. Chromium identifies
-itself honestly; the monitor does not patch browser fingerprints or bypass
-site challenges.
+## eBay 403 handling
+
+eBay blocks requests with a Python TLS fingerprint. The monitor uses
+[curl_cffi](https://github.com/yifeikong/curl-cffi) to impersonate Chrome's
+TLS/JA3 fingerprint and seeds the session by visiting the eBay homepage first
+to obtain session cookies — this resolves the 403 in most cases.
+
+If 403 errors persist (e.g. on datacenter IPs), enable `BROWSER_FETCH=true`
+or configure a residential proxy.
 
 ## Proxy support
 
@@ -84,12 +90,9 @@ Exports: `listings.csv`, `price_history.csv`, and `sold_statistics.csv`.
 
 ## Limitations
 
-- **Known issue:** eBay support is currently partial. Depending on the IP,
-  region and request volume, eBay search pages may return HTTP 403 or 429.
-  Other configured marketplaces continue scanning when this happens.
 - eBay may hide final Best Offer amounts.
 - Public HTML and sold-query behavior can change.
 - Proxy quality and legality are the operator's responsibility.
-- eBay may block datacenter or heavily reused proxy IPs.
+- eBay may block datacenter or heavily reused proxy IPs — use a residential proxy or `BROWSER_FETCH=true` in that case.
 - Demand estimates depend on the visible sold-result window.
 - Kleinanzeigen and Vinted have no equivalent public sold-results search, so sold-price and demand analytics are eBay-only.
