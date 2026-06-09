@@ -1,0 +1,16 @@
+services:
+  monitor:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - data:/data
+    restart: unless-stopped
+    # Chromium requires these security options inside Docker
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=unconfined
+
+volumes:
+  data:

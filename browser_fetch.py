@@ -37,6 +37,8 @@ class BrowserFetcher:
                 "--headless=new",
                 "--lang=de-DE",
                 "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",          # required in Docker (runs as root)
+                "--disable-dev-shm-usage",  # avoids /dev/shm OOM in containers
             ],
         }
         if self.proxy_url:
