@@ -26,11 +26,15 @@ class BrowserFetcher:
 
     def __enter__(self):
         self._playwright = sync_playwright().start()
-        # Non-headless Chromium bypasses eBay's Akamai JS bot-detection challenge.
-        # headless=True (old or new mode) is detectable; a visible browser is not.
+        # Use Chrome's new headless mode (--headless=new, Chrome 112+).
+        # The old --headless flag is trivially detectable; --headless=new is not,
+        # which lets it pass eBay's Akamai JS bot-detection challenge.
+        # headless=False tells Playwright not to add its own --headless flag so
+        # our explicit --headless=new takes full effect.
         launch_options: dict = {
             "headless": False,
             "args": [
+                "--headless=new",
                 "--lang=de-DE",
                 "--disable-blink-features=AutomationControlled",
             ],
