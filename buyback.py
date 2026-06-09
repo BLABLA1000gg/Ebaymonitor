@@ -3,8 +3,8 @@ Buyback / refurbished-price scrapers for arbitrage profit estimation.
 
 Supported sites
 ---------------
-clevertronic  – sells refurbished phones; shows lowest price per condition.
-                URL: https://www.clevertronic.de/kaufen/handy-kaufen/BRAND/MODEL
+clevertronic  – Ankauf site (what Clevertronic pays YOU per condition).
+                URL: https://www.clevertronic.de/handy_verkaufen/PRODUCT_ID/SLUG
 
 zoxs          – buyback site (Ankauf); shows what ZOXS pays you per condition.
                 URL: https://www.zoxs.de/verkaufen/MODEL-ankauf/ASIN.html
@@ -18,7 +18,7 @@ Usage
 -----
     from buyback import BuybackScraper
     with BuybackScraper() as scraper:
-        ct   = scraper.clevertronic("https://www.clevertronic.de/kaufen/handy-kaufen/apple/iphone-12")
+        ct   = scraper.clevertronic("https://www.clevertronic.de/handy_verkaufen/15097/apple-iphone-12-pro-128gb-graphit-verkaufen")
         zoxs = scraper.zoxs("https://www.zoxs.de/verkaufen/iphone-12-ankauf/B08L5TNKZC.html")
         wkfs = scraper.wirkaufens("https://wirkaufens.de/produkte/apple-iphone-12-128-gb")
         # Each returns {condition_name: Decimal(price)}
@@ -83,14 +83,19 @@ class BuybackScraper:
             self._pw.stop()
 
     # ------------------------------------------------------------------ #
-    # Clevertronic – sell prices (what they charge customers)             #
+    # Clevertronic – Ankaufpreise (what Clevertronic pays YOU)           #
+    # URL: /handy_verkaufen/PRODUCT_ID/SLUG                              #
     # ------------------------------------------------------------------ #
 
-    def clevertronic(self, url: str) -> dict[str, Decimal]:
+    def clevertronic(self, url: str, functional: bool = True, battery_ok: bool = True) -> dict[str, Decimal]:
         """
-        Scrape condition-based sell prices from a Clevertronic category page.
+        Scrape Clevertronic Ankaufpreise per condition.
 
-        Returns {condition_name: lowest_price} for available conditions only.
+        functional / battery_ok control the first wizard question:
+          - True  → "Ja – voll funktionsfähig und Akku mindestens bei 81%"
+          - False → "Nein – Einschränkungen vorhanden oder Akku unter 81%"
+
+        Returns {condition_label: price} for all available conditions.
         """
         ctx = self._browser.new_context(
             locale="de-DE",
@@ -102,27 +107,78 @@ class BuybackScraper:
         )
         page = ctx.new_page()
         result: dict[str, Decimal] = {}
+        # Device is "good" only when fully functional AND battery OK
+        device_good = functional and battery_ok
         try:
-            base = url.split("/kaufen/")[0]
-            page.goto(base, wait_until="domcontentloaded", timeout=20000)
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            try:
-                page.wait_for_selector("div.button_modellfilter_zustand", timeout=12000)
-            except Exception:
-                page.wait_for_timeout(4000)
+            page.wait_for_timeout(2500)
 
-            soup = BeautifulSoup(page.content(), "html.parser")
-            for btn in soup.find_all("div", class_="button_modellfilter_zustand"):
-                if btn.get("data-available") != "1":
+            # Step 1: Dismiss cookie banner / any blocking modal via JS
+            page.evaluate("""() => {
+                document.querySelectorAll('dialog[open]').forEach(d => d.close());
+                document.querySelectorAll('.popup.active').forEach(p => p.remove());
+                document.querySelectorAll('[id*="cookie"] button').forEach(b => b.click());
+            }""")
+            page.wait_for_timeout(400)
+
+            # Step 2: Click the correct functional answer
+            # "Ja – voll funktionsfähig" = first button; "Nein – Einschränkungen" = second
+            if device_good:
+                page.evaluate("document.querySelectorAll('.js_sellbox_button')[0]?.click()")
+            else:
+                page.evaluate("document.querySelectorAll('.js_sellbox_button')[1]?.click()")
+            page.wait_for_timeout(600)
+
+            # Step 3: Click "Weiter" button
+            page.evaluate(
+                "document.querySelector('.sellbox_button_next')?.click()"
+            )
+            page.wait_for_timeout(800)
+
+            # Step 4: Find ONLY the main condition buttons (Neu, Wie neu, Sehr gut, Gut, etc.)
+            # These are always in the second step of the wizard after clicking "Weiter".
+            # Sub-question buttons (e.g. "Ja, das Display...") appear later and are longer.
+            _VALID_CONDITIONS = {"neu", "wie neu", "sehr gut", "gut", "gebraucht", "akzeptabel", "beschädigt"}
+
+            cond_labels = page.evaluate("""() => {
+                return [...document.querySelectorAll('.js_sellbox_button')]
+                    .map(b => ({
+                        text: b.textContent.trim().replace(/\\s+/g, ' '),
+                        cls: b.className
+                    }))
+                    .filter(o => o.text.length > 0);
+            }""")
+
+            for item in (cond_labels or []):
+                raw_label = item.get("text", "") if isinstance(item, dict) else str(item)
+                # Strip badge suffixes like "HÄUFIGSTE ANTWORT"
+                clean_label = re.sub(r"[A-ZÄÖÜ\s]{6,}$", "", raw_label).strip()
+                # Only process known condition labels
+                if clean_label.lower() not in _VALID_CONDITIONS:
                     continue
-                name_span = btn.find("span", recursive=False)
-                price_span = btn.find("span", class_="right")
-                if not name_span or not price_span:
-                    continue
-                name = name_span.get_text(strip=True)
-                price = _parse_eur(price_span.get_text(" ", strip=True))
-                if name and price is not None:
-                    result[name] = price
+
+                # Click the condition button
+                page.evaluate(
+                    """(label) => {
+                        const btn = [...document.querySelectorAll('.js_sellbox_button')]
+                            .find(b => b.textContent.trim().startsWith(label.substring(0, 6)));
+                        btn?.click();
+                    }""",
+                    clean_label,
+                )
+                page.wait_for_timeout(600)
+
+                # Read price from span.sell_price
+                price_text = page.evaluate("""() => {
+                    const el = document.querySelector('span.sell_price');
+                    return el ? el.textContent.trim() : null;
+                }""")
+
+                if price_text:
+                    price = _parse_eur(price_text)
+                    if price is not None and price > 0:
+                        result[clean_label] = price
+
         finally:
             ctx.close()
         return result
@@ -131,18 +187,23 @@ class BuybackScraper:
     # ZOXS – Ankaufpreise (what ZOXS pays you, per condition)            #
     # ------------------------------------------------------------------ #
 
-    def zoxs(self, url: str) -> dict[str, Decimal]:
+    def zoxs(
+        self,
+        url: str,
+        functional: bool = True,
+        battery_ok: bool = True,
+        has_box: bool = False,
+        has_cable: bool = False,
+    ) -> dict[str, Decimal]:
         """
         Scrape ZOXS Ankaufpreise for all conditions of a product.
 
-        Strategy
-        --------
-        1. Open the product page (ASIN URL) to obtain Cloudflare clearance cookies.
-        2. Accept the GDPR modal.
-        3. Click the first available condition to trigger a ``sys_article_price.php``
-           XHR request; intercept it to capture ``articleId`` and ``questions``.
-        4. Use the browser's own ``fetch()`` (which carries CF cookies) to query
-           all remaining conditions without further UI interaction.
+        The assessment parameters control the bonus question answers that ZOXS
+        asks after condition selection — these affect the final price:
+          functional  → "Voll funktionstüchtig?" (Ja/Nein)
+          battery_ok  → "Akku in Ordnung?"       (Ja/Nein)
+          has_box     → "OVP vorhanden?"          (Ja/Nein)
+          has_cable   → "Original Kabel?"         (Ja/Nein)
 
         Returns {condition_name: ankaufpreis} for conditions with price > 0.
         """
@@ -206,7 +267,48 @@ class BuybackScraper:
                 return result  # page probably shows "we don't buy this" message
 
             article_id = captured["articleId"]
-            questions = captured["questions"]
+            # Start with captured questions (device-specific), then override
+            # with our AI-assessed answers where we know the question IDs.
+            questions = dict(captured["questions"])
+            # Inject AI-assessed answers into the questions dict.
+            # ZOXS question IDs (common for smartphones — may vary by product):
+            # We update keys we know about; unknown keys keep their captured value.
+            _Q_FUNCTIONAL = None  # discovered dynamically from page
+            _Q_BATTERY    = None
+            _Q_BOX        = None
+            _Q_CABLE      = None
+
+            # Read question metadata from the page to map ID → meaning
+            q_meta = page.evaluate("""() => {
+                return [...document.querySelectorAll('.questionItem, [data-question-id]')]
+                    .map(el => ({
+                        id: el.dataset.questionId || el.id || '',
+                        text: el.textContent.toLowerCase().trim().slice(0, 80)
+                    }));
+            }""")
+            for qm in (q_meta or []):
+                t = qm.get("text", "")
+                qid = str(qm.get("id", "")).strip()
+                if not qid:
+                    continue
+                if any(kw in t for kw in ("funktionsfähig", "funktionstüchtig", "working", "funktion")):
+                    _Q_FUNCTIONAL = qid
+                elif any(kw in t for kw in ("akku", "batterie", "battery")):
+                    _Q_BATTERY = qid
+                elif any(kw in t for kw in ("ovp", "originalverpack", "box", "karton")):
+                    _Q_BOX = qid
+                elif any(kw in t for kw in ("kabel", "cable", "lightning", "usb")):
+                    _Q_CABLE = qid
+
+            # Apply AI-determined answers (1=Ja, 0=Nein)
+            if _Q_FUNCTIONAL and _Q_FUNCTIONAL in questions:
+                questions[_Q_FUNCTIONAL] = 1 if functional else 0
+            if _Q_BATTERY and _Q_BATTERY in questions:
+                questions[_Q_BATTERY] = 1 if battery_ok else 0
+            if _Q_BOX and _Q_BOX in questions:
+                questions[_Q_BOX] = 1 if has_box else 0
+            if _Q_CABLE and _Q_CABLE in questions:
+                questions[_Q_CABLE] = 1 if has_cable else 0
 
             # Now call sys_article_price.php for every condition via the browser's fetch()
             # (browser carries Cloudflare CF cookies; direct requests would be blocked)
@@ -255,23 +357,15 @@ class BuybackScraper:
     # WirKaufens – Ankaufpreise (what WirKaufens pays you, per condition) #
     # ------------------------------------------------------------------ #
 
-    def wirkaufens(self, url: str) -> dict[str, Decimal]:
+    def wirkaufens(self, url: str, functional: bool = True, battery_ok: bool = True) -> dict[str, Decimal]:
         """
         Scrape WirKaufens Ankaufpreise for all conditions of a product.
 
-        Strategy
-        --------
-        1. Open the product page to get session cookies (cookie consent required).
-        2. Accept the cookie consent banner via JS.
-        3. Trigger one API call to ``/trade-in/devices`` by JS-clicking Ja + a
-           condition — this reveals the ``device`` ID and ``questions`` payload.
-        4. Use the browser's own ``fetch()`` to query all conditions at once.
+        functional / battery_ok map to WirKaufens questions:
+          - Question 4 (Gerät einwandfrei benutzbar?): functional → 1 (Ja) or 0 (Nein)
+          - Question 2 (Batterie in Ordnung?):          battery_ok → 1 (Ja) or 0 (Nein)
 
-        Conditions: Neu, Wie Neu, Gut, In Ordnung, Schlecht
-        (best-case answers: all questions answered Ja/1)
-
-        Example URL:
-            https://wirkaufens.de/produkte/apple-iphone-12-128-gb
+        Returns {condition_label: price} for all conditions.
         """
         ctx = self._browser.new_context(
             locale="de-DE",
@@ -284,7 +378,15 @@ class BuybackScraper:
         page = ctx.new_page()
         result: dict[str, Decimal] = {}
 
-        # Intercept /trade-in/devices to capture device_id + questions
+        # WirKaufens question IDs (derived from UI inspection):
+        # Q4 = Gerät lässt sich einwandfrei benutzen?
+        # Q2 = Batterie in Ordnung?
+        wkfs_questions = {
+            "4": 1 if functional else 0,
+            "2": 1 if battery_ok else 0,
+        }
+
+        # Intercept /trade-in/devices to capture the device ID
         captured: dict[str, Any] = {}
 
         def on_request(req: Any) -> None:
@@ -304,23 +406,23 @@ class BuybackScraper:
             page.evaluate("document.getElementById('cookiescript_accept')?.click()")
             page.wait_for_timeout(800)
 
-            # Trigger one /trade-in/devices call to capture device_id + questions
+            # Trigger one /trade-in/devices call to capture the device ID
+            # Always click Ja first to capture the device_id (we override questions manually)
             page.evaluate("""
                 async () => {
                     const click = el => el?.dispatchEvent(
                         new MouseEvent('click', {bubbles: true, cancelable: true})
                     );
-                    // Answer Ja for all visible Ja/Nein questions
                     document.querySelectorAll('button[id^="answer-1"]').forEach(click);
                     await new Promise(r => setTimeout(r, 400));
-                    // Select any condition on the slider
                     click(document.querySelector('[data-condition="4"]'));
                 }
             """)
             page.wait_for_timeout(2000)
 
             device_id = captured.get("device")
-            questions = captured.get("questions", {"2": 1, "4": 1})
+            # Use our AI-determined question answers, not whatever the page captured
+            questions = wkfs_questions
 
             if not device_id:
                 return result

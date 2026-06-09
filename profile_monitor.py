@@ -116,15 +116,52 @@ def scan_profiles(
         listing_extras = {}
         has_buyback = ct_prices or zoxs_prices or wirkaufens_prices
         if has_buyback:
-            from condition_detect import detect_condition, is_worth_it, COND_LABELS
+            from condition_detect import (
+                detect_condition, is_worth_it, COND_LABELS,
+                ai_assess_listing_batch, COND_BROKEN,
+            )
             provider = settings.ai_provider if settings else "none"
             api_key = (settings.nvidia_api_key if provider == "nvidia"
                        else settings.deepseek_api_key if provider == "deepseek"
                        else "") if settings else ""
             ship = Decimal(str(settings.shipping_cost_eur)) if settings else Decimal("5")
             fee  = Decimal(str(settings.ebay_fee_rate))     if settings else Decimal("0.1235")
-            for item in active:
-                cond_score = detect_condition(item.title, platform_condition=item.condition)
+
+            # AI full assessment: condition + functional + battery_ok + has_box + has_cable
+            # Items with a platform condition field still get AI assessment for
+            # functional/battery/box/cable — only the condition score is overridden.
+            assessments: list[dict] = []
+            if api_key and provider != "none" and active:
+                try:
+                    batch_in = [(item.title, getattr(item, "description", "") or "")
+                                for item in active]
+                    assessments = ai_assess_listing_batch(batch_in, api_key=api_key, provider=provider)
+                    LOGGER.info("%s: AI assessment batch done for %d listings",
+                                profile.name, len(active))
+                except Exception as err:
+                    LOGGER.warning("%s: AI assessment batch failed: %s", profile.name, err)
+
+            # Pad assessments if shorter than active list
+            default_assessment = {"condition": None, "functional": True,
+                                   "battery_ok": True, "has_box": False, "has_cable": False}
+            while len(assessments) < len(active):
+                assessments.append(default_assessment.copy())
+
+            for i, item in enumerate(active):
+                assess = assessments[i]
+
+                # Condition priority: platform field > AI > regex
+                if item.condition:
+                    cond_score = detect_condition(item.title, platform_condition=item.condition)
+                elif assess.get("condition") is not None:
+                    cond_score = assess["condition"]
+                else:
+                    cond_score = detect_condition(item.title)
+
+                # Non-functional device → force lowest condition regardless
+                if not assess.get("functional", True):
+                    cond_score = COND_BROKEN
+
                 worth, profit, roi = is_worth_it(
                     listing_price=item.price or Decimal("0"),
                     condition_score=cond_score,
@@ -134,10 +171,11 @@ def scan_profiles(
                     shipping_cost=ship,
                     fee_rate=fee,
                     image_url=item.image_url,
+                    listing_url=item.link,
                     api_key=api_key,
                     provider=provider,
                     title=item.title,
-                    description="",
+                    description=getattr(item, "description", "") or "",
                 )
                 listing_extras[item.link] = {
                     "detected_condition": COND_LABELS.get(cond_score, "Gut"),
@@ -146,9 +184,15 @@ def scan_profiles(
                     "condition_roi": roi,
                 }
                 if worth:
-                    LOGGER.info("%s: WORTH IT — %s | Zustand=%s Profit=%.0f€ ROI=%.0f%%",
-                                profile.name, item.title[:60],
-                                COND_LABELS.get(cond_score), profit or 0, (roi or 0)*100)
+                    LOGGER.info(
+                        "%s: WORTH IT — %s | Zustand=%s functional=%s battery=%s "
+                        "box=%s Profit=%.0f€ ROI=%.0f%%",
+                        profile.name, item.title[:55],
+                        COND_LABELS.get(cond_score),
+                        assess.get("functional"), assess.get("battery_ok"),
+                        assess.get("has_box"),
+                        profit or 0, (roi or 0) * 100,
+                    )
 
         store.record_profile_analysis(profile, sold_url, active, metrics,
                                       ct_prices or None, zoxs_prices or None,
@@ -238,13 +282,16 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
                 LOGGER.warning("%s: %s search failed: %s", profile.name, platform, err)
                 platform_results[platform] = []
 
-    # For each platform pick best matching product and scrape prices
+    # For each platform pick best matching product and scrape prices.
+    # We always scrape with functional=True / battery_ok=True to get the FULL
+    # condition price table. The per-listing assessment then picks the right tier
+    # (e.g. a non-functional listing uses COND_BROKEN which maps to the lowest price).
     with BuybackScraper() as bs:
         if "clevertronic" in platform_results and platform_results["clevertronic"]:
             best = _best_match(platform_results["clevertronic"], dominant_gb)
             if best:
                 try:
-                    prices = bs.clevertronic(best["url"])
+                    prices = bs.clevertronic(best["url"], functional=True, battery_ok=True)
                     ct_prices.update({k: str(v) for k, v in prices.items()})
                     LOGGER.info("%s: Clevertronic [%s]: %s", profile.name, best["name"], ct_prices)
                 except Exception as err:
@@ -254,7 +301,8 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
             best = _best_match(platform_results["zoxs"], dominant_gb)
             if best:
                 try:
-                    prices = bs.zoxs(best["url"])
+                    prices = bs.zoxs(best["url"], functional=True, battery_ok=True,
+                                     has_box=False, has_cable=False)
                     zoxs_prices.update({k: str(v) for k, v in prices.items()})
                     LOGGER.info("%s: ZOXS [%s]: %s", profile.name, best["name"], zoxs_prices)
                 except Exception as err:
@@ -264,7 +312,7 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
             best = _best_match(platform_results["wirkaufens"], dominant_gb)
             if best:
                 try:
-                    prices = bs.wirkaufens(best["url"])
+                    prices = bs.wirkaufens(best["url"], functional=True, battery_ok=True)
                     wirkaufens_prices.update({k: str(v) for k, v in prices.items()})
                     LOGGER.info("%s: WirKaufens [%s]: %s", profile.name, best["name"], wirkaufens_prices)
                 except Exception as err:

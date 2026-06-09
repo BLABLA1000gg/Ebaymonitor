@@ -88,11 +88,33 @@ def search_wirkaufens(query: str) -> list[dict]:
                         credentials: 'include'
                     });
                     const data = await r.json();
-                    return (data?.hits?.hits || []).map(h => ({
-                        id: h._source.id,
-                        name: h._source.name,
-                        url: 'https://wirkaufens.de/produkte/' + h._source.url
-                    })).filter(x => x.id);
+                    // Filter: all query words must appear as whole words in the product name
+                    const qwords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
+                    return (data?.hits?.hits || [])
+                        .map(h => ({
+                            id: h._source.id,
+                            name: h._source.name,
+                            url: 'https://wirkaufens.de/produkte/' + h._source.url
+                        }))
+                        .filter(x => {
+                            if (!x.id) return false;
+                            // Normalize: remove spaces before GB/TB so "128 GB" == "128GB"
+                            const nl = x.name.toLowerCase().replace(/(\d)\s+(gb|tb)/g, '$1$2');
+                            return qwords.every(w => {
+                                // Normalize query word too
+                                const wn = w.replace(/(\d)\s+(gb|tb)/g, '$1$2');
+                                // Use word boundary for pure numbers to avoid "12" matching "12GB RAM"
+                                if (/^\d+$/.test(wn)) {
+                                    return new RegExp('(?<![\\d])' + wn + '(?![\\d])').test(nl);
+                                }
+                                // For "128gb" style tokens, match the number part with word boundary
+                                const gbMatch = wn.match(/^(\d+)(gb|tb)$/);
+                                if (gbMatch) {
+                                    return new RegExp('(?<![\\d])' + gbMatch[1] + gbMatch[2]).test(nl);
+                                }
+                                return nl.includes(wn);
+                            });
+                        });
                 }
                 """,
                 [es_source, query],
@@ -113,9 +135,11 @@ def search_wirkaufens(query: str) -> list[dict]:
 
 def search_zoxs(query: str) -> list[dict]:
     """
-    Search ZOXS by fetching the Apple iPhone category page and filtering
-    by the query keyword. Returns [{name, url}].
-    The URL is the ASIN-based product URL needed by BuybackScraper.zoxs().
+    Search ZOXS for a phone model. Returns [{name, url}].
+    URL is the ASIN-based product URL needed by BuybackScraper.zoxs().
+
+    Strategy: build a model-specific category slug (e.g. "iphone-12") and
+    try that page first; fall back to the brand-level category page.
     """
     key = f"zoxs:{query.lower()}"
     cached = _cached(key)
@@ -126,63 +150,109 @@ def search_zoxs(query: str) -> list[dict]:
         from curl_cffi.requests import Session as CurlSession
         from bs4 import BeautifulSoup
 
-        # Determine category page from query keywords
         q_lower = query.lower()
-        if "iphone" in q_lower or "apple" in q_lower:
-            cat_url = "https://www.zoxs.de/verkaufen/apple-iphone-ankauf.html"
-        elif "samsung" in q_lower or "galaxy" in q_lower:
-            cat_url = "https://www.zoxs.de/verkaufen/samsung-galaxy-ankauf.html"
-        elif "pixel" in q_lower:
-            cat_url = "https://www.zoxs.de/verkaufen/google-pixel-ankauf.html"
-        else:
-            cat_url = "https://www.zoxs.de/verkaufen/handy-smartphone-ankauf.html"
+
+        # Build candidate category URLs, most specific first
+        cat_urls = _zoxs_category_urls(q_lower)
 
         headers = {
             "Accept": "text/html,*/*;q=0.8",
             "Accept-Language": "de-DE,de;q=0.9",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         }
-        with CurlSession(impersonate="chrome120") as s:
-            # Seed homepage
-            s.get("https://www.zoxs.de/", headers=headers, timeout=10)
-            r = s.get(cat_url, headers={**headers, "Referer": "https://www.zoxs.de/"}, timeout=10)
 
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        # Product cards: <a class="... nav-link ..."> wrapping <div class="article-card">
-        results = []
-        # Split query into meaningful words (min 2 chars), require ALL to match
+        # Split query into meaningful tokens; use word-boundary matching so
+        # "12" doesn't accidentally match inside "128GB".
         q_words = [w for w in re.split(r"\s+", q_lower) if len(w) >= 2]
 
-        for a in soup.find_all("a", class_="nav-link", href=True):
-            href = a.get("href", "")
-            # Only ASIN-based links (e.g. iphone-12-ankauf/B08L5TNKZC.html)
-            if not re.search(r"/[A-Z0-9]{10}\.html$", href):
-                continue
-            title_span = a.find("span")
-            name = title_span.get_text(strip=True) if title_span else a.get_text(strip=True)
-            if not name:
-                continue
-            name_lower = name.lower()
-            if all(w in name_lower for w in q_words):
-                full_url = f"https://www.zoxs.de/{href.lstrip('/')}"
-                results.append({"name": name, "url": full_url})
-            if len(results) >= 10:
-                break
+        def _word_matches(name_lower: str, words: list[str]) -> bool:
+            for w in words:
+                # Use word boundary if token is purely numeric (avoid "12" ⊂ "128")
+                if w.isdigit():
+                    if not re.search(r"(?<!\d)" + re.escape(w) + r"(?!\d)", name_lower):
+                        return False
+                else:
+                    if w not in name_lower:
+                        return False
+            return True
 
-        return _store(key, results)
+        results: list[dict] = []
+        with CurlSession(impersonate="chrome120") as s:
+            s.get("https://www.zoxs.de/", headers=headers, timeout=10)
+            for cat_url in cat_urls:
+                r = s.get(cat_url, headers={**headers, "Referer": "https://www.zoxs.de/"}, timeout=10)
+                soup = BeautifulSoup(r.text, "html.parser")
+                for a in soup.find_all("a", class_="nav-link", href=True):
+                    href = a.get("href", "")
+                    if not re.search(r"/[A-Z0-9]{10}\.html$", href):
+                        continue
+                    title_span = a.find("span")
+                    name = title_span.get_text(strip=True) if title_span else a.get_text(strip=True)
+                    if not name:
+                        continue
+                    name_lower = name.lower()
+                    if _word_matches(name_lower, q_words):
+                        full_url = f"https://www.zoxs.de/{href.lstrip('/')}"
+                        if not any(r["url"] == full_url for r in results):
+                            results.append({"name": name, "url": full_url})
+                if results:
+                    break  # found results on this category page — stop
+
+        return _store(key, results[:10])
 
     except Exception:
         return []
 
 
+def _zoxs_category_urls(q_lower: str) -> list[str]:
+    """Build ZOXS category page URLs to try, from most to least specific."""
+    urls = []
+
+    # Try to extract a model slug like "iphone-12-pro" from the query
+    # Pattern: "iphone" or "galaxy" followed by model identifier
+    model_match = re.search(
+        r"(iphone[\s\-]?(?:se[\s\-]?(?:\d{4})?\s*|(?:\d+(?:\s*(?:pro|plus|max|mini|ultra|ultra\s*max))*)))",
+        q_lower,
+    )
+    if model_match:
+        slug = re.sub(r"\s+", "-", model_match.group(1).strip().rstrip("-"))
+        # Remove storage size from slug if present
+        slug = re.sub(r"-?\d{2,4}\s*gb.*", "", slug).strip("-")
+        if slug:
+            urls.append(f"https://www.zoxs.de/verkaufen/apple-{slug}-ankauf.html")
+            urls.append(f"https://www.zoxs.de/verkaufen/{slug}-ankauf.html")
+
+    galaxy_match = re.search(r"(galaxy[\s\-]?[a-z0-9]+(?:[\s\-][a-z0-9]+)*)", q_lower)
+    if galaxy_match:
+        slug = re.sub(r"\s+", "-", galaxy_match.group(1).strip())
+        slug = re.sub(r"-?\d{2,4}\s*gb.*", "", slug).strip("-")
+        if slug:
+            urls.append(f"https://www.zoxs.de/verkaufen/{slug}-ankauf.html")
+
+    pixel_match = re.search(r"(pixel[\s\-]?\d+[a-z]*)", q_lower)
+    if pixel_match:
+        slug = re.sub(r"\s+", "-", pixel_match.group(1).strip())
+        urls.append(f"https://www.zoxs.de/verkaufen/{slug}-ankauf.html")
+
+    # Fall back to brand-level pages
+    if "iphone" in q_lower or "apple" in q_lower:
+        urls.append("https://www.zoxs.de/verkaufen/apple-iphone-ankauf.html")
+    if "samsung" in q_lower or "galaxy" in q_lower:
+        urls.append("https://www.zoxs.de/verkaufen/samsung-galaxy-ankauf.html")
+    if "pixel" in q_lower:
+        urls.append("https://www.zoxs.de/verkaufen/google-pixel-ankauf.html")
+    urls.append("https://www.zoxs.de/verkaufen/handy-smartphone-ankauf.html")
+    return urls
+
+
 # ------------------------------------------------------------------ #
-# Clevertronic – scrape product links from category pages             #
+# Clevertronic – search trade-in (Ankauf) product pages              #
 # ------------------------------------------------------------------ #
 
 def search_clevertronic(query: str) -> list[dict]:
     """
-    Search Clevertronic by fetching their Apple category page and filtering.
-    Returns [{name, url}] where url is the category page for BuybackScraper.clevertronic().
+    Search Clevertronic Ankauf products via their autocomplete API.
+    Returns [{name, url}] where url is a /handy_verkaufen/ product page.
     """
     key = f"ct:{query.lower()}"
     cached = _cached(key)
@@ -191,48 +261,31 @@ def search_clevertronic(query: str) -> list[dict]:
 
     try:
         from curl_cffi.requests import Session as CurlSession
-        from bs4 import BeautifulSoup
+        import json as _json
 
-        q_lower = query.lower()
-        if "iphone" in q_lower or "apple" in q_lower:
-            cat_url = "https://www.clevertronic.de/kaufen/handy-kaufen/apple"
-        elif "samsung" in q_lower or "galaxy" in q_lower:
-            cat_url = "https://www.clevertronic.de/kaufen/handy-kaufen/samsung"
-        elif "pixel" in q_lower:
-            cat_url = "https://www.clevertronic.de/kaufen/handy-kaufen/google"
-        else:
-            cat_url = "https://www.clevertronic.de/kaufen/handy-kaufen"
+        headers = {
+            "Accept": "application/json, text/javascript, */*",
+            "Accept-Language": "de-DE,de;q=0.9",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Referer": "https://www.clevertronic.de/handy_verkaufen/",
+        }
 
-        headers = {"Accept": "text/html,*/*;q=0.8", "Accept-Language": "de-DE,de;q=0.9",
-                   "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        import urllib.parse
+        api_url = f"https://www.clevertronic.de/findTypes.php?is_ankauf=1&query={urllib.parse.quote(query)}"
+
         with CurlSession(impersonate="chrome120") as s:
-            r = s.get(cat_url, headers=headers, timeout=10)
+            r = s.get(api_url, headers=headers, timeout=10)
+            data = _json.loads(r.text)
 
-        soup = BeautifulSoup(r.text, "html.parser")
-        q_words = [w for w in re.split(r"\s+", q_lower) if len(w) >= 2]
         results = []
+        for item in data.get("suggestions", []):
+            name = item.get("article_type_name") or item.get("value", "")
+            path = item.get("buying_page_url", "")
+            if name and path:
+                full_url = f"https://www.clevertronic.de{path}" if path.startswith("/") else path
+                results.append({"name": name, "url": full_url})
 
-        for a in soup.find_all("a", href=re.compile(r"/kaufen/handy-kaufen/\w+/[\w-]+")):
-            href = a.get("href", "")
-            # Skip generic category links (too short path)
-            parts = href.strip("/").split("/")
-            if len(parts) < 4:
-                continue
-            name = a.get_text(strip=True) or parts[-1].replace("-", " ").title()
-            if not name or len(name) < 4:
-                continue
-            name_lower = name.lower()
-            href_lower = href.lower()
-            # Match against name OR href slug
-            combined = name_lower + " " + href_lower
-            if all(w in combined for w in q_words):
-                full_url = f"https://www.clevertronic.de{href}" if href.startswith("/") else href
-                if not any(r["url"] == full_url for r in results):
-                    results.append({"name": name, "url": full_url})
-            if len(results) >= 10:
-                break
-
-        return _store(key, results)
+        return _store(key, results[:10])
 
     except Exception:
         return []
