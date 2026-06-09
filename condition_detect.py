@@ -299,17 +299,23 @@ def ai_assess_listing_batch(
         )
 
     system_prompt = (
-        "You are a second-hand phone listing analyzer. "
-        "For each numbered listing, output a JSON object with these keys:\n"
-        "  condition: integer 0-5 "
-        "(0=defekt/broken, 1=stark gebraucht/heavy wear, 2=gut/normal use, "
-        "3=sehr gut/light scratches, 4=wie neu/barely used, 5=neu/sealed)\n"
-        "  functional: true ONLY if device is fully working AND has no significant physical damage. "
-        "Set false if: broken/cracked screen, cracked back glass/housing, water damage, "
-        "needs repair, not turning on, or any major defect mentioned.\n"
+        "You are a second-hand phone listing analyzer for resale arbitrage. "
+        "Grade each listing using these EXACT condition levels that map to buyback portal prices:\n"
+        "  5 = Neu: brand new, sealed, OVP\n"
+        "  4 = Wie neu: no visible marks, display pristine, frame/back pristine\n"
+        "  3 = Sehr gut: display no/minimal marks; frame/back may have few light scratches\n"
+        "  2 = Gut: display has visible wear; frame/back has visible scratches/wear\n"
+        "  1 = Gebraucht: display clearly worn; frame/back many scratches, dents, paint wear\n"
+        "  0 = Beschädigt: display OR back/frame has a CRACK or BREAK (portals reject these)\n\n"
+        "For each numbered listing output a JSON object with:\n"
+        "  condition: integer 0-5 as above\n"
+        "  functional: true ONLY if fully working, no significant damage. "
+        "Set false if: cracked/broken screen, cracked back glass, water damage, "
+        "not turning on, needs repair, touch defect.\n"
         "  battery_ok: true if battery >=81% or not mentioned, false if explicitly <81%\n"
         "  has_box: true if original box/OVP included\n"
         "  has_cable: true if original cable/charger included\n"
+        "When in doubt grade ONE level lower (be conservative). "
         "Output ONLY a JSON array of objects, one per listing, in order. No text."
     )
 
@@ -1072,20 +1078,24 @@ def ai_assess_listing_full(
     content.append({"type": "text", "text": (
         f"{listing_text}\n\n"
         "You are evaluating a second-hand phone listing for resale arbitrage. "
-        "Look at ALL provided photos AND the title/description together.\n\n"
+        "Look at the photo AND the title/description together.\n\n"
+        "Use these EXACT condition grades (they map directly to buyback portal prices):\n\n"
+        "5 = Neu: Brand new, sealed, original packaging (OVP/ungeöffnet)\n"
+        "4 = Wie neu: No visible marks at all, display pristine, frame/back pristine\n"
+        "3 = Sehr gut: Display has no or minimal traces; frame/back may have a few light scratches\n"
+        "2 = Gut: Display has visible wear; frame/back has visible wear/scratches\n"
+        "1 = Gebraucht: Display has clearly visible heavy wear; frame/back has many scratches, dents, paint wear\n"
+        "0 = Beschädigt/Defekt: Display OR frame/back has a CRACK or BREAK — buyback portals reject these\n\n"
+        "functional: false if ANY of these apply: cracked/broken screen, cracked back glass, "
+        "water damage, device not turning on, needs repair, display defect, touch not working\n"
+        "battery_ok: false only if description explicitly states battery <81% health\n"
+        "has_box: true if original box/OVP mentioned\n"
+        "has_cable: true if original cable/charger mentioned\n\n"
+        "IMPORTANT: photo overrides text — if photo shows damage not mentioned in text, "
+        "use the lower condition. When in doubt, grade ONE level lower (be conservative).\n\n"
         "Reply with ONLY a JSON object, no text before or after:\n"
         '{"condition": <0-5>, "functional": <true/false>, '
-        '"battery_ok": <true/false>, "has_box": <true/false>, "has_cable": <true/false>}\n\n'
-        "Rules:\n"
-        "condition: 0=broken/cracked screen or body, 1=heavy scratches/dents, "
-        "2=normal wear visible, 3=light scratches only, 4=like new, 5=sealed/new\n"
-        "functional: false if ANY of these: cracked/broken screen, cracked back glass, "
-        "water damage, not turning on, needs repair, display damage mentioned\n"
-        "battery_ok: false only if description explicitly states battery <81%\n"
-        "has_box: true if original box/OVP mentioned\n"
-        "has_cable: true if original cable/charger mentioned\n"
-        "IMPORTANT: photos override text — if photos show damage not mentioned in text, "
-        "reflect that in condition and functional."
+        '"battery_ok": <true/false>, "has_box": <true/false>, "has_cable": <true/false>}'
     )})
 
     try:
