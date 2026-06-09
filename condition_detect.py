@@ -50,14 +50,81 @@ _DEVICE_REQUIRED_ANY: list[str] = []
 
 def is_actual_device(title: str, description: str = "") -> bool:
     """
-    Return True if the listing is an actual smartphone/device,
-    False if it's a case, charger, accessory, spare part, etc.
+    Fast regex pre-filter: False if obvious accessory keyword found.
+    Use ai_is_device() for accurate LLM-based classification.
     """
     t = (title + " " + description[:300]).lower()
     for kw in _ACCESSORY_KEYWORDS:
         if kw in t:
             return False
     return True
+
+
+_device_cache: dict[str, bool] = {}
+
+
+def ai_is_device(
+    title: str,
+    description: str = "",
+    api_key: str = "",
+    provider: str = "none",
+) -> bool:
+    """
+    Ask the LLM whether this listing is an actual smartphone/tablet,
+    not an accessory, case, cable, spare part, etc.
+
+    Falls back to regex filter when no API key is set.
+    Results are cached per title prefix.
+    """
+    # Fast path: regex catches obvious cases without wasting tokens
+    if not is_actual_device(title, description):
+        return False
+
+    if not api_key or provider == "none":
+        return True  # regex said OK, no LLM available → trust it
+
+    cache_key = (title.strip().lower())[:80]
+    if cache_key in _device_cache:
+        return _device_cache[cache_key]
+
+    prompt = (
+        "Is this marketplace listing selling an actual smartphone or tablet device "
+        "(not a case, cover, charger, cable, screen protector, spare part, accessory, or bundle)?\n"
+        f"Title: {title}\n"
+        + (f"Description: {description[:300]}" if description else "")
+        + "\nReply with exactly one word: YES or NO."
+    )
+
+    answer = None
+    try:
+        if provider == "nvidia":
+            from openai import OpenAI
+            client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key)
+            resp = client.chat.completions.create(
+                model="meta/llama-3.1-8b-instruct",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=5,
+                stream=False,
+            )
+            answer = resp.choices[0].message.content.strip().upper()
+        elif provider == "deepseek":
+            import requests as _req
+            r = _req.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": "deepseek-chat",
+                      "messages": [{"role": "user", "content": prompt}],
+                      "max_tokens": 5, "temperature": 0},
+                timeout=8,
+            )
+            answer = r.json()["choices"][0]["message"]["content"].strip().upper()
+    except Exception:
+        pass
+
+    result = answer.startswith("YES") if answer else True
+    _device_cache[cache_key] = result
+    return result
 
 
 # ------------------------------------------------------------------ #
@@ -354,7 +421,8 @@ def is_worth_it(
     If ROI looks good AND image_url+api_key provided → also checks image condition.
     """
     # Hard block: accessories, cases, chargers etc. are never worth it
-    if title and not is_actual_device(title, description):
+    # Uses AI when api_key is set, regex-only fallback otherwise
+    if title and not ai_is_device(title, description, api_key=api_key, provider=provider):
         return False, None, None
 
     matched = matched_buyback_price(condition_score, zoxs_prices, wkfs_prices, clevertronic_prices)
