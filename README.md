@@ -35,6 +35,21 @@ python profile_monitor.py --once
 python profile_monitor.py
 ```
 
+## Docker
+
+```bash
+docker compose up -d
+```
+
+Open `http://localhost:5000`. The database is stored in a Docker volume and persists across restarts.
+
+```bash
+docker compose logs -f   # view logs
+docker compose down      # stop
+```
+
+> **Note:** Hosting on a datacenter/VPS IP may get blocked by eBay. Configure a residential proxy per profile in that case.
+
 ## eBay bot detection
 
 eBay uses Akamai bot-detection that blocks standard HTTP clients and headless browsers. The monitor works around this by running Chromium in its new headless mode (`--headless=new`, Chrome 112+), which is indistinguishable from a real browser session. No visible window appears.
