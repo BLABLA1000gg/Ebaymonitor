@@ -49,8 +49,29 @@
     <input required name="name" value="{{ profile.name if profile else '' }}">
   </label>
 
-  <label class="wide">Search URL (eBay, Kleinanzeigen or Vinted)
-    <input required type="url" name="ebay_url" value="{{ profile.ebay_url if profile else '' }}">
+  <!-- Keyword + Marketplace builder -->
+  <div class="wide" style="margin-bottom:0">
+    <label style="display:block;margin-bottom:6px">
+      Keywords &amp; Marktplatz
+      <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:6px">
+        <input type="text" id="kw-input" placeholder="z.B. iPhone 12 128GB"
+               autocomplete="off" style="margin:0">
+        <select id="mp-select" style="margin:0;min-width:140px">
+          <option value="ebay">eBay.de</option>
+          <option value="ka">Kleinanzeigen</option>
+          <option value="vinted">Vinted</option>
+        </select>
+      </div>
+      <span style="font-size:11px;color:var(--muted);margin-top:4px;display:block">
+        Tipp: Keywords eingeben → URL wird automatisch generiert
+      </span>
+    </label>
+  </div>
+
+  <label class="wide">Such-URL (wird automatisch ausgefüllt oder manuell eingeben)
+    <input required type="url" name="ebay_url" id="ebay_url_field"
+           value="{{ profile.ebay_url if profile else '' }}"
+           placeholder="https://www.ebay.de/sch/i.html?_nkw=iphone+12+128gb">
   </label>
 
   <label class="wide">eBay reference URL for flip profit (optional)
@@ -198,16 +219,38 @@ function extractKeyword(url) {
   } catch { return ''; }
 }
 
-const ebayInput = document.querySelector('input[name="ebay_url"]');
-const kwDisplay = document.getElementById('kw-display');
+const ebayUrlField = document.getElementById('ebay_url_field');
+const kwDisplay    = document.getElementById('kw-display');
+const kwInput      = document.getElementById('kw-input');
+const mpSelect     = document.getElementById('mp-select');
+
+const MP_URLS = {
+  ebay:   kw => `https://www.ebay.de/sch/i.html?_nkw=${encodeURIComponent(kw)}&_sacat=0`,
+  ka:     kw => `https://www.kleinanzeigen.de/s-${encodeURIComponent(kw).replace(/%20/g,'-')}/k0`,
+  vinted: kw => `https://www.vinted.de/catalog?search_text=${encodeURIComponent(kw)}`,
+};
+
+function buildUrl() {
+  const kw = kwInput.value.trim();
+  if (!kw) return;
+  const mp = mpSelect.value;
+  ebayUrlField.value = MP_URLS[mp](kw);
+  updateKeywordPreview();
+}
+
+if (kwInput)  kwInput.addEventListener('input', buildUrl);
+if (mpSelect) mpSelect.addEventListener('change', buildUrl);
 
 function updateKeywordPreview() {
-  const kw = extractKeyword(ebayInput.value.trim());
+  const kw = extractKeyword(ebayUrlField.value.trim());
   kwDisplay.textContent = kw || '—';
 }
 
-if (ebayInput) {
-  ebayInput.addEventListener('input', updateKeywordPreview);
+if (ebayUrlField) {
+  ebayUrlField.addEventListener('input', updateKeywordPreview);
+  // Pre-fill keyword field from existing URL
+  const existing = extractKeyword(ebayUrlField.value.trim());
+  if (existing && kwInput) kwInput.value = existing;
   updateKeywordPreview();
 }
 </script>

@@ -112,8 +112,46 @@ def scan_profiles(
 
         successful_profiles += 1
         metrics = market_metrics(sold, len(active), profile.sold_window_days)
+
+        # Per-listing condition detection + worth-it scoring
+        listing_extras = {}
+        has_buyback = ct_prices or zoxs_prices or wirkaufens_prices
+        if has_buyback:
+            from condition_detect import detect_condition, is_worth_it, COND_LABELS
+            provider = settings.ai_provider if settings else "none"
+            api_key = (settings.nvidia_api_key if provider == "nvidia"
+                       else settings.deepseek_api_key if provider == "deepseek"
+                       else "") if settings else ""
+            ship = Decimal(str(settings.shipping_cost_eur)) if settings else Decimal("5")
+            fee  = Decimal(str(settings.ebay_fee_rate))     if settings else Decimal("0.1235")
+            for item in active:
+                cond_score = detect_condition(item.title, platform_condition=item.condition)
+                worth, profit, roi = is_worth_it(
+                    listing_price=item.price or Decimal("0"),
+                    condition_score=cond_score,
+                    zoxs_prices=zoxs_prices or None,
+                    wkfs_prices=wirkaufens_prices or None,
+                    clevertronic_prices=ct_prices or None,
+                    shipping_cost=ship,
+                    fee_rate=fee,
+                    image_url=item.image_url,
+                    api_key=api_key,
+                    provider=provider,
+                )
+                listing_extras[item.link] = {
+                    "detected_condition": COND_LABELS.get(cond_score, "Gut"),
+                    "worth_it": worth,
+                    "condition_profit": float(profit) if profit is not None else None,
+                    "condition_roi": roi,
+                }
+                if worth:
+                    LOGGER.info("%s: WORTH IT — %s | Zustand=%s Profit=%.0f€ ROI=%.0f%%",
+                                profile.name, item.title[:60],
+                                COND_LABELS.get(cond_score), profit or 0, (roi or 0)*100)
+
         store.record_profile_analysis(profile, sold_url, active, metrics,
-                                      ct_prices or None, zoxs_prices or None, wirkaufens_prices or None)
+                                      ct_prices or None, zoxs_prices or None,
+                                      wirkaufens_prices or None, listing_extras or None)
         for item in active:
             all_active[item.link] = item
         LOGGER.info(

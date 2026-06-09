@@ -30,6 +30,10 @@ _MIGRATIONS = [
     "ALTER TABLE search_profiles ADD COLUMN wirkaufens_url TEXT",
     "ALTER TABLE profile_listings ADD COLUMN wirkaufens_prices TEXT",
     "ALTER TABLE search_profiles ADD COLUMN buyback_platforms TEXT",
+    "ALTER TABLE profile_listings ADD COLUMN detected_condition TEXT",
+    "ALTER TABLE profile_listings ADD COLUMN worth_it INTEGER DEFAULT 0",
+    "ALTER TABLE profile_listings ADD COLUMN condition_profit TEXT",
+    "ALTER TABLE profile_listings ADD COLUMN condition_roi TEXT",
 ]
 
 
@@ -144,22 +148,41 @@ class MonitorStore:
         clevertronic_prices: dict | None = None,
         zoxs_prices: dict | None = None,
         wirkaufens_prices: dict | None = None,
+        listing_extras: dict | None = None,
     ):
+        """
+        listing_extras: {link: {'detected_condition': str, 'worth_it': bool,
+                                'condition_profit': float, 'condition_roi': float}}
+        """
         if profile.id is None:
             raise ValueError("Profile must be saved before analysis")
         now = datetime.now(timezone.utc).isoformat()
         ct_json = json.dumps(clevertronic_prices) if clevertronic_prices else None
         zoxs_json = json.dumps(zoxs_prices) if zoxs_prices else None
         wkfs_json = json.dumps(wirkaufens_prices) if wirkaufens_prices else None
+        extras = listing_extras or {}
         with self.connection:
             self.connection.execute(
                 "INSERT INTO market_snapshots(profile_id,sold_url,raw_sold_count,accepted_sold_count,average_sold_price,median_sold_price,minimum_sold_price,maximum_sold_price,sold_per_month,active_count,sell_through_rate,estimated_days_to_sell,demand,observed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (profile.id,sold_url,metrics.raw_count,metrics.accepted_count,_decimal(metrics.average),_decimal(metrics.median),_decimal(metrics.minimum),_decimal(metrics.maximum),str(metrics.sold_per_month),metrics.active_count,_decimal(metrics.sell_through_rate),_decimal(metrics.estimated_days_to_sell),metrics.demand,now),
             )
             for item in active:
+                ex = extras.get(item.link, {})
                 self.connection.execute(
-                    "INSERT INTO profile_listings(profile_id,link,deal_score,clevertronic_prices,zoxs_prices,wirkaufens_prices,last_seen) VALUES(?,?,?,?,?,?,?) ON CONFLICT(profile_id,link) DO UPDATE SET deal_score=excluded.deal_score,clevertronic_prices=excluded.clevertronic_prices,zoxs_prices=excluded.zoxs_prices,wirkaufens_prices=excluded.wirkaufens_prices,last_seen=excluded.last_seen",
-                    (profile.id,item.link,_decimal(deal_score(item.price, metrics.median)),ct_json,zoxs_json,wkfs_json,now),
+                    "INSERT INTO profile_listings(profile_id,link,deal_score,clevertronic_prices,zoxs_prices,wirkaufens_prices,detected_condition,worth_it,condition_profit,condition_roi,last_seen) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(profile_id,link) DO UPDATE SET "
+                    "deal_score=excluded.deal_score,clevertronic_prices=excluded.clevertronic_prices,"
+                    "zoxs_prices=excluded.zoxs_prices,wirkaufens_prices=excluded.wirkaufens_prices,"
+                    "detected_condition=excluded.detected_condition,worth_it=excluded.worth_it,"
+                    "condition_profit=excluded.condition_profit,condition_roi=excluded.condition_roi,"
+                    "last_seen=excluded.last_seen",
+                    (profile.id, item.link, _decimal(deal_score(item.price, metrics.median)),
+                     ct_json, zoxs_json, wkfs_json,
+                     ex.get("detected_condition"), int(bool(ex.get("worth_it"))),
+                     str(ex["condition_profit"]) if ex.get("condition_profit") is not None else None,
+                     str(ex["condition_roi"]) if ex.get("condition_roi") is not None else None,
+                     now),
                 )
 
     def dashboard(self, profile_id=None, shipping_cost=Decimal("5.00"), fee_rate=Decimal("0.1235")):
@@ -170,7 +193,14 @@ class MonitorStore:
         if selected is not None:
             snapshot = self.connection.execute("SELECT * FROM market_snapshots WHERE profile_id=? ORDER BY observed_at DESC LIMIT 1", (selected,)).fetchone()
             trend = self.connection.execute("SELECT * FROM market_snapshots WHERE profile_id=? ORDER BY observed_at ASC LIMIT 180", (selected,)).fetchall()
-            raw_deals = self.connection.execute("SELECT l.*,pl.deal_score FROM profile_listings pl JOIN listings l ON l.link=pl.link WHERE pl.profile_id=? AND l.active=1 ORDER BY CAST(pl.deal_score AS REAL) DESC LIMIT 50", (selected,)).fetchall()
+            raw_deals = self.connection.execute(
+                "SELECT l.*,pl.deal_score,pl.clevertronic_prices,pl.zoxs_prices,pl.wirkaufens_prices,"
+                "pl.detected_condition,pl.worth_it,pl.condition_profit,pl.condition_roi "
+                "FROM profile_listings pl JOIN listings l ON l.link=pl.link "
+                "WHERE pl.profile_id=? AND l.active=1 "
+                "ORDER BY pl.worth_it DESC, CAST(pl.deal_score AS REAL) DESC LIMIT 50",
+                (selected,)
+            ).fetchall()
 
             # Arbitrage: if the profile has an ebay_reference_url, look up the
             # latest median sold price for that eBay search to compute flip profit.
@@ -197,12 +227,20 @@ class MonitorStore:
                     d["flip_roi"] = None
                     d["ref_median"] = None
                 # Buyback prices (stored as JSON strings)
-                ct_raw = row["clevertronic_prices"] if "clevertronic_prices" in row.keys() else None
+                keys = row.keys()
+                ct_raw = row["clevertronic_prices"] if "clevertronic_prices" in keys else None
                 d["clevertronic_prices"] = json.loads(ct_raw) if ct_raw else None
-                zoxs_raw = row["zoxs_prices"] if "zoxs_prices" in row.keys() else None
+                zoxs_raw = row["zoxs_prices"] if "zoxs_prices" in keys else None
                 d["zoxs_prices"] = json.loads(zoxs_raw) if zoxs_raw else None
-                wkfs_raw = row["wirkaufens_prices"] if "wirkaufens_prices" in row.keys() else None
+                wkfs_raw = row["wirkaufens_prices"] if "wirkaufens_prices" in keys else None
                 d["wirkaufens_prices"] = json.loads(wkfs_raw) if wkfs_raw else None
+                # Condition + worth-it fields
+                d["detected_condition"] = row["detected_condition"] if "detected_condition" in keys else None
+                d["worth_it"] = bool(row["worth_it"]) if "worth_it" in keys and row["worth_it"] else False
+                cp = row["condition_profit"] if "condition_profit" in keys else None
+                d["condition_profit"] = float(cp) if cp else None
+                cr = row["condition_roi"] if "condition_roi" in keys else None
+                d["condition_roi"] = float(cr) if cr else None
                 deals.append(d)
 
         return {"profiles":profiles,"selected_profile_id":selected,"snapshot":dict(snapshot) if snapshot else None,"trend":[dict(x) for x in trend or []],"deals":deals or []}
