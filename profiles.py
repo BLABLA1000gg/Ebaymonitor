@@ -25,6 +25,9 @@ class SearchProfile:
     # Optional Clevertronic category URL for condition-based refurbished sell prices.
     # e.g. https://www.clevertronic.de/kaufen/handy-kaufen/apple/iphone-12
     clevertronic_url: str | None = None
+    # Optional ZOXS product URL for Ankaufpreise (what ZOXS pays you) per condition.
+    # e.g. https://www.zoxs.de/verkaufen/iphone-12-ankauf/B08L5TNKZC.html
+    zoxs_url: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "proxy_url", validate_proxy_url(self.proxy_url))

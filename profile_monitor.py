@@ -77,20 +77,27 @@ def scan_profiles(
             if errors is not None:
                 errors.append(message)
             continue
-        # Fetch Clevertronic condition prices if the profile has a reference URL.
-        # Run this outside the main BrowserFetcher context (browser already closed).
+        # Fetch buyback prices if configured.
+        # Run outside the main BrowserFetcher context (browser already closed).
         ct_prices: dict = {}
-        if profile.clevertronic_url:
+        zoxs_prices: dict = {}
+        needs_buyback = profile.clevertronic_url or profile.zoxs_url
+        if needs_buyback:
             try:
                 with BuybackScraper() as bs:
-                    ct_prices = {k: str(v) for k, v in bs.clevertronic(profile.clevertronic_url).items()}
-                LOGGER.info("%s: Clevertronic prices fetched: %s", profile.name, ct_prices)
+                    if profile.clevertronic_url:
+                        ct_prices = {k: str(v) for k, v in bs.clevertronic(profile.clevertronic_url).items()}
+                        LOGGER.info("%s: Clevertronic prices: %s", profile.name, ct_prices)
+                    if profile.zoxs_url:
+                        zoxs_prices = {k: str(v) for k, v in bs.zoxs(profile.zoxs_url).items()}
+                        LOGGER.info("%s: ZOXS Ankaufpreise: %s", profile.name, zoxs_prices)
             except Exception as err:
-                LOGGER.warning("%s: Clevertronic fetch failed: %s", profile.name, err)
+                LOGGER.warning("%s: Buyback fetch failed: %s", profile.name, err)
 
         successful_profiles += 1
         metrics = market_metrics(sold, len(active), profile.sold_window_days)
-        store.record_profile_analysis(profile, sold_url, active, metrics, ct_prices or None)
+        store.record_profile_analysis(profile, sold_url, active, metrics,
+                                      ct_prices or None, zoxs_prices or None)
         for item in active:
             all_active[item.link] = item
         LOGGER.info(
