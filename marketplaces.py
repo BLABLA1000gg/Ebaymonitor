@@ -1,3 +1,4 @@
+from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
@@ -153,9 +154,19 @@ def fetch_marketplace_listings(
         response = browser_fetcher.get(url, timeout)
         response_text = response.text
     elif marketplace is EBAY:
-        # eBay requires a real browser TLS fingerprint — use curl_cffi
+        # eBay uses an Akamai JS challenge that blocks headless scrapers.
+        # curl_cffi alone is no longer sufficient; fall back to curl_cffi and
+        # detect the challenge page, or use the caller-supplied BrowserFetcher.
         response = _fetch_ebay(url, headers, timeout)
         response_text = response.text
+        # If we received the JS challenge page, propagate a clear error so the
+        # caller can retry with a BrowserFetcher.
+        if response.status_code == 200 and "challenge" in response_text[:4000]:
+            raise requests.HTTPError(
+                "eBay returned a bot-challenge page. Enable browser fetch in Settings "
+                "or pass a BrowserFetcher to bypass Akamai detection.",
+                response=response,
+            )
     else:
         response = session.get(url, headers=headers, timeout=timeout)
         response_text = response.text

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import argparse
 import logging
 import os
@@ -8,7 +9,7 @@ import requests
 
 from analytics import market_metrics
 from browser_fetch import BrowserFetcher
-from marketplaces import marketplace_for_url
+from marketplaces import EBAY, marketplace_for_url
 from monitor import fetch_listings, sold_search_url
 from proxy import ProfileProxyStore, redact_proxy_url, request_proxies
 from settings import SettingsStore
@@ -36,9 +37,10 @@ def scan_profiles(
             with requests.Session() as session:
                 if proxy_url:
                     session.proxies.update(request_proxies(proxy_url) or {})
-                browser_context = (
-                    BrowserFetcher(proxy_url) if settings.browser_fetch else None
-                )
+                # eBay requires a real (non-headless) browser to bypass Akamai bot
+                # detection. Always use BrowserFetcher for eBay profiles.
+                use_browser = marketplace is EBAY or settings.browser_fetch
+                browser_context = BrowserFetcher(proxy_url) if use_browser else None
                 if browser_context:
                     browser_context.__enter__()
                 try:

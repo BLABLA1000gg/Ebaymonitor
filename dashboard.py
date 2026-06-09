@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 from decimal import Decimal, InvalidOperation
 from pathlib import Path

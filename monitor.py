@@ -1,6 +1,8 @@
+from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -57,17 +59,70 @@ def text_or_none(element, selector: str) -> str | None:
 def parse_listings(html: str) -> list[Listing]:
     soup = BeautifulSoup(html, "html.parser")
     listings: list[Listing] = []
-    for element in soup.select(".s-item"):
-        link_element = element.select_one(".s-item__link")
-        title = text_or_none(element, ".s-item__title")
-        price_text = text_or_none(element, ".s-item__price")
-        link = link_element.get("href") if link_element else None
-        if not link or not title or not price_text or title.casefold() == "shop on ebay":
+    seen_ids: set[str] = set()
+
+    for li in soup.find_all("li", class_="s-card"):
+        # Each physical listing appears in 3 <li class="s-card"> elements;
+        # deduplicate by the data-listingid attribute.
+        listing_id = li.get("data-listingid", "")
+        if listing_id and listing_id in seen_ids:
             continue
-        image_element = element.select_one(".s-item__image-img")
+
+        # The title link (not the image link)
+        link_el = li.find("a", class_="s-card__link", href=lambda h: h and "/itm/" in h)
+        if not link_el:
+            continue
+        link = link_el.get("href", "")
+
+        # Skip US sponsored listings served on ebay.de pages
+        if "ebay.com/itm/" in link and "ebay.de/itm/" not in link:
+            continue
+
+        # Title: first primary-default styled span, or fall back to image alt
+        title_span = li.select_one("span.su-styled-text.primary.default")
+        img_el = li.find("img", class_="s-card__image")
+        if title_span:
+            title = title_span.get_text(" ", strip=True)
+        elif img_el:
+            # Remove trailing " Bild X von Y" from alt text
+            alt = img_el.get("alt", "")
+            title = re.sub(r"\s+Bild \d+ von \d+$", "", alt).strip()
+        else:
+            title = None
+
+        # Price: primary bold span (e.g. "EUR 224,00")
+        price_span = li.select_one("span.su-styled-text.primary.bold")
+        price_text = price_span.get_text(" ", strip=True) if price_span else None
+
+        if not link or not title or not price_text:
+            continue
+        if title.casefold() in ("shop on ebay", ""):
+            continue
+
+        if listing_id:
+            seen_ids.add(listing_id)
+
+        # Image
         image_url = None
-        if image_element:
-            image_url = image_element.get("src") or image_element.get("data-src")
+        if img_el:
+            image_url = img_el.get("src") or img_el.get("data-src")
+
+        # Condition: secondary-default span containing a pipe separator
+        condition = None
+        for sp in li.select("span.su-styled-text.secondary.default"):
+            txt = sp.get_text(" ", strip=True)
+            if "|" in txt:
+                condition = txt.rstrip(" |").strip()
+                break
+
+        # Shipping: positive-bold or secondary-large span mentioning delivery/shipping
+        shipping = None
+        for sp in li.select("span.su-styled-text.positive.bold, span.su-styled-text.secondary.large"):
+            txt = sp.get_text(" ", strip=True)
+            if any(kw in txt for kw in ("Lieferung", "Versand", "Gratis", "kostenlos", "Abholung")):
+                shipping = txt
+                break
+
         price, currency = parse_price(price_text)
         listings.append(
             Listing(
@@ -77,9 +132,8 @@ def parse_listings(html: str) -> list[Listing]:
                 price=price,
                 currency=currency,
                 image_url=image_url,
-                condition=text_or_none(element, ".SECONDARY_INFO"),
-                shipping=text_or_none(element, ".s-item__shipping, .s-item__logisticsCost"),
-                location=text_or_none(element, ".s-item__location"),
+                condition=condition,
+                shipping=shipping,
             )
         )
     return listings
