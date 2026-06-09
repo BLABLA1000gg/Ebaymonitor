@@ -153,14 +153,26 @@ def scan_profiles(
                 profile.name.lower(),
             )
 
+            # Modifiers that indicate a CHEAPER variant — if in title but not
+            # in profile, the listing is a different (lower-value) device.
+            _DOWNGRADE_MODS = {"mini", "se"}
+            _profile_name_l = profile.name.lower()
+
             def _title_matches_profile(title: str) -> bool:
                 if not _profile_tokens:
                     return True
                 tl = title.lower()
-                return all(
-                    re.search(r'\b' + re.escape(t) + r'\b', tl)
-                    for t in _profile_tokens
-                )
+                # All profile model tokens must appear in the title
+                if not all(re.search(r'\b' + re.escape(t) + r'\b', tl)
+                           for t in _profile_tokens):
+                    return False
+                # Title must not introduce a cheaper variant modifier
+                # e.g. "mini" in title but profile is "iphone 13" (not mini)
+                for mod in _DOWNGRADE_MODS:
+                    if (re.search(r'\b' + mod + r'\b', tl)
+                            and mod not in _profile_name_l):
+                        return False
+                return True
 
             # ── Parallel per-listing assessment ─────────────────────────────
             # Each listing is processed in its own thread:
@@ -227,8 +239,9 @@ def scan_profiles(
                             LOGGER.warning("%s: vision failed for %s: %s",
                                            profile.name, item.title[:40], ve)
 
-                        # Fallback: text-only if vision returned None
-                        if assess is None and item_desc:
+                        # Fallback: text-only when vision returned None
+                        # (happens for KA listings whose images need auth)
+                        if assess is None:
                             try:
                                 batch = ai_assess_listing_batch(
                                     [(item.title, item_desc)],
@@ -239,7 +252,7 @@ def scan_profiles(
                             except Exception:
                                 pass
 
-                    # If AI is available but assessment still failed → skip
+                    # If BOTH vision AND text-only failed → skip listing
                     if api_key and provider == "nvidia" and assess is None:
                         LOGGER.info("%s: SKIP (AI nicht verfügbar) — %s",
                                     profile.name, item.title[:60])
