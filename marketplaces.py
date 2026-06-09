@@ -80,6 +80,9 @@ def parse_vinted_listings(html: str) -> list[Listing]:
         href = link_element.get("href") if link_element else None
         if not href or not title or not price_text:
             continue
+        # Strip query params (e.g. ?referrer=catalog) — keeps URLs canonical
+        # so DB deduplication works correctly across scans.
+        href = href.split("?")[0]
         image = element.select_one('img[data-testid$="--image--img"]')
         price, currency = parse_price(price_text)
         listings.append(
