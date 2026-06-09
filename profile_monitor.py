@@ -119,6 +119,7 @@ def scan_profiles(
             from condition_detect import (
                 detect_condition, is_worth_it, COND_LABELS,
                 ai_assess_listing_batch, COND_BROKEN,
+                ai_assess_listing_full, _fetch_ka_details, _fetch_vinted_details,
             )
             provider = settings.ai_provider if settings else "none"
             api_key = (settings.nvidia_api_key if provider == "nvidia"
@@ -127,72 +128,140 @@ def scan_profiles(
             ship = Decimal(str(settings.shipping_cost_eur)) if settings else Decimal("5")
             fee  = Decimal(str(settings.ebay_fee_rate))     if settings else Decimal("0.1235")
 
-            # AI full assessment: condition + functional + battery_ok + has_box + has_cable
-            # Items with a platform condition field still get AI assessment for
-            # functional/battery/box/cable — only the condition score is overridden.
+            # DeepSeek: text batch first (no vision available)
+            default_assessment = {"condition": None, "functional": True,
+                                   "battery_ok": True, "has_box": False, "has_cable": False}
             assessments: list[dict] = []
-            if api_key and provider != "none" and active:
+            if api_key and provider == "deepseek" and active:
                 try:
                     batch_in = [(item.title, getattr(item, "description", "") or "")
                                 for item in active]
                     assessments = ai_assess_listing_batch(batch_in, api_key=api_key, provider=provider)
-                    LOGGER.info("%s: AI assessment batch done for %d listings",
-                                profile.name, len(active))
                 except Exception as err:
-                    LOGGER.warning("%s: AI assessment batch failed: %s", profile.name, err)
-
-            # Pad assessments if shorter than active list
-            default_assessment = {"condition": None, "functional": True,
-                                   "battery_ok": True, "has_box": False, "has_cable": False}
+                    LOGGER.warning("%s: AI text-batch failed: %s", profile.name, err)
             while len(assessments) < len(active):
                 assessments.append(default_assessment.copy())
 
-            for i, item in enumerate(active):
-                assess = assessments[i]
+            # ── Parallel per-listing assessment ─────────────────────────────
+            # Each listing is processed in its own thread:
+            #   1. Fetch real description (KA/Vinted page fetch)
+            #   2. Regex hard-block
+            #   3. AI vision assessment (title + description + images)
+            #   4. ROI calculation
+            # Max 6 concurrent workers — limited by NVIDIA API rate limits.
 
-                # Condition priority: platform field > AI > regex
-                if item.condition:
-                    cond_score = detect_condition(item.title, platform_condition=item.condition)
-                elif assess.get("condition") is not None:
-                    cond_score = assess["condition"]
-                else:
-                    cond_score = detect_condition(item.title)
+            def _assess_item(item, text_assess):
+                """Process one listing. Returns (link, extras_dict)."""
+                try:
+                    item_desc = getattr(item, "description", "") or ""
 
-                # Non-functional device → force lowest condition regardless
-                if not assess.get("functional", True):
-                    cond_score = COND_BROKEN
+                    # Fetch real description for KA/Vinted
+                    if not item_desc and item.link:
+                        try:
+                            if "kleinanzeigen.de" in item.link:
+                                _, item_desc = _fetch_ka_details(item.link)
+                            elif "vinted." in item.link:
+                                _, item_desc = _fetch_vinted_details(item.link)
+                        except Exception:
+                            pass
 
-                worth, profit, roi = is_worth_it(
-                    listing_price=item.price or Decimal("0"),
-                    condition_score=cond_score,
-                    zoxs_prices=zoxs_prices or None,
-                    wkfs_prices=wirkaufens_prices or None,
-                    clevertronic_prices=ct_prices or None,
-                    shipping_cost=ship,
-                    fee_rate=fee,
-                    image_url=item.image_url,
-                    listing_url=item.link,
-                    api_key=api_key,
-                    provider=provider,
-                    title=item.title,
-                    description=getattr(item, "description", "") or "",
-                )
-                listing_extras[item.link] = {
-                    "detected_condition": COND_LABELS.get(cond_score, "Gut"),
-                    "worth_it": worth,
-                    "condition_profit": float(profit) if profit is not None else None,
-                    "condition_roi": roi,
-                }
-                if worth:
-                    LOGGER.info(
-                        "%s: WORTH IT — %s | Zustand=%s functional=%s battery=%s "
-                        "box=%s Profit=%.0f€ ROI=%.0f%%",
-                        profile.name, item.title[:55],
-                        COND_LABELS.get(cond_score),
-                        assess.get("functional"), assess.get("battery_ok"),
-                        assess.get("has_box"),
-                        profit or 0, (roi or 0) * 100,
+                    # Layer 1: regex hard-block on title+description
+                    raw_cond = detect_condition(item.title, description=item_desc)
+                    if raw_cond == COND_BROKEN:
+                        LOGGER.info("%s: SKIP (defekt-keywords) — %s",
+                                    profile.name, item.title[:60])
+                        return item.link, {"detected_condition": "Defekt", "worth_it": False,
+                                           "condition_profit": None, "condition_roi": None}
+
+                    # Layer 2: AI assessment (vision model sees title+desc+images)
+                    assess = text_assess
+                    if api_key and provider == "nvidia":
+                        try:
+                            full = ai_assess_listing_full(
+                                title=item.title,
+                                description=item_desc,
+                                image_url=item.image_url,
+                                listing_url=item.link,
+                                api_key=api_key,
+                                provider=provider,
+                                max_images=3,
+                            )
+                            if full:
+                                assess = full
+                        except Exception as ve:
+                            LOGGER.warning("%s: AI assessment failed for %s: %s",
+                                           profile.name, item.title[:40], ve)
+
+                    # Layer 3: non-functional → skip
+                    if not assess.get("functional", True):
+                        LOGGER.info("%s: SKIP (AI: nicht funktional) — %s",
+                                    profile.name, item.title[:60])
+                        return item.link, {"detected_condition": "Defekt", "worth_it": False,
+                                           "condition_profit": None, "condition_roi": None}
+
+                    # Condition score: platform field > AI (if worse) > regex
+                    if item.condition:
+                        cond_score = detect_condition(item.title, platform_condition=item.condition)
+                        ai_cond = assess.get("condition")
+                        if ai_cond is not None and ai_cond < cond_score:
+                            LOGGER.info("%s: AI overrides platform %s→%s — %s",
+                                        profile.name, COND_LABELS.get(cond_score),
+                                        COND_LABELS.get(ai_cond), item.title[:50])
+                            cond_score = ai_cond
+                    elif assess.get("condition") is not None:
+                        cond_score = assess["condition"]
+                    else:
+                        cond_score = raw_cond
+
+                    worth, profit, roi = is_worth_it(
+                        listing_price=item.price or Decimal("0"),
+                        condition_score=cond_score,
+                        zoxs_prices=zoxs_prices or None,
+                        wkfs_prices=wirkaufens_prices or None,
+                        clevertronic_prices=ct_prices or None,
+                        shipping_cost=ship,
+                        fee_rate=fee,
+                        title=item.title,
+                        description=item_desc,
+                        api_key=api_key,
+                        provider=provider,
                     )
+                    if worth:
+                        LOGGER.info(
+                            "%s: WORTH IT — %s | Zustand=%s functional=%s "
+                            "battery=%s box=%s Profit=%.0f€ ROI=%.0f%%",
+                            profile.name, item.title[:50],
+                            COND_LABELS.get(cond_score),
+                            assess.get("functional"), assess.get("battery_ok"),
+                            assess.get("has_box"),
+                            profit or 0, (roi or 0) * 100,
+                        )
+                    return item.link, {
+                        "detected_condition": COND_LABELS.get(cond_score, "Gut"),
+                        "worth_it": worth,
+                        "condition_profit": float(profit) if profit is not None else None,
+                        "condition_roi": roi,
+                    }
+                except Exception as e:
+                    LOGGER.warning("%s: _assess_item error for %s: %s",
+                                   profile.name, item.title[:40], e)
+                    return item.link, {"detected_condition": "Gut", "worth_it": False,
+                                       "condition_profit": None, "condition_roi": None}
+
+            # Run all listings in parallel (max 6 threads — respects NVIDIA rate limit)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+                futures = {
+                    ex.submit(_assess_item, item, assessments[i]): item
+                    for i, item in enumerate(active)
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        link, extras = future.result(timeout=120)
+                        listing_extras[link] = extras
+                    except Exception as e:
+                        item = futures[future]
+                        LOGGER.warning("%s: assessment timeout/error for %s: %s",
+                                       profile.name, item.title[:40], e)
 
         store.record_profile_analysis(profile, sold_url, active, metrics,
                                       ct_prices or None, zoxs_prices or None,

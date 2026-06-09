@@ -18,29 +18,36 @@ from typing import Any
 
 # Keywords that indicate it's NOT the device itself
 _ACCESSORY_KEYWORDS = [
-    # Cases & covers
-    "hülle", "huelle", "case", "cover", "schutzhülle", "schutzhuelle",
-    "bumper", "handyhülle", "handyhuelle", "wallet case", "flip case",
-    "book case", "lederhülle", "silikonhülle", "tpu hülle",
+    # Cases & covers — must be in TITLE only (checked separately)
+    "handyhülle", "handyhuelle", "schutzhülle", "schutzhuelle",
+    "bumper", "wallet case", "flip case", "book case",
+    "lederhülle", "silikonhülle", "tpu hülle",
     # Screen protection
-    "schutzglas", "panzerglas", "folie", "screen protector", "displayschutz",
-    "schutzfolie", "glasfolie",
-    # Cables & chargers
-    "kabel", "ladekabel", "ladegerät", "charger", "netzteil", "usb",
-    "lightning kabel", "magsafe", "ladestation", "wireless charger",
-    "powerbank", "power bank",
+    "panzerglas", "screen protector", "displayschutz", "schutzfolie", "glasfolie",
+    # Cables / chargers as standalone product
+    "ladekabel", "ladegerät", "ladestation", "wireless charger",
+    "powerbank", "power bank", "magsafe",
     # Accessories
-    "halter", "halterung", "ständer", "stand", "mount", "autohalter",
-    "kopfhörer", "kopfhoerer", "airpods", "earpods", "earbuds",
-    "adapter", "dongle", "hub",
-    # Spare parts / repairs
-    "ersatzteil", "display ersatz", "akku ersatz", "reparatur",
-    "gehäuse", "gehaeuse", "backcover", "back cover", "rückseite",
-    "flex kabel", "lautsprecher ersatz",
-    # Bundles with ambiguous pricing
-    "zubehör", "zubehoer", "bundle",
-    # Smartwatch / tablet confusion
-    "apple watch", "ipad", "airpods", "homepod",
+    "halterung", "autohalter", "kopfhörer", "kopfhoerer",
+    "earpods", "earbuds", "dongle",
+    # Spare parts
+    "ersatzteil", "display ersatz", "akku ersatz", "flex kabel",
+    "lautsprecher ersatz",
+    # Back glass as standalone spare part
+    "backglas", "back glas", "rückglas", "rueckglas",
+    # Wanted / buying ads — multi-word to avoid false positives
+    "ankauf suche", "suche iphone", "kaufe iphone", "suche samsung",
+    "kaufe samsung", "suche smartphone", "kaufe smartphone",
+    "ankauf iphone", "ankauf samsung", "wir kaufen", "ich kaufe",
+    # Smartwatch / tablet
+    "apple watch", "ipad", "homepod",
+]
+
+# Keywords only checked in TITLE (not description) — too common in descriptions
+_TITLE_ONLY_ACCESSORY = [
+    "hülle", "schutzglas", "kabel", "charger", "netzteil",
+    "adapter", "hub", "airpods", "reparatur service",
+    "gesucht", "wanted", "looking for", "zubehör", "zubehoer", "bundle",
 ]
 
 # Must contain at least one of these to be a real phone listing
@@ -51,17 +58,22 @@ _DEVICE_REQUIRED_ANY: list[str] = []
 def is_actual_device(title: str, description: str = "") -> bool:
     """
     Fast regex pre-filter: False if obvious accessory keyword found.
-    Use ai_is_device() for accurate LLM-based classification.
+    Checks full text for _ACCESSORY_KEYWORDS, title-only for _TITLE_ONLY_ACCESSORY.
     """
-    t = (title + " " + description[:300]).lower()
+    title_l = title.lower()
+    full_l = (title + " " + description[:500]).lower()
     for kw in _ACCESSORY_KEYWORDS:
-        if kw in t:
+        if kw in full_l:
+            return False
+    for kw in _TITLE_ONLY_ACCESSORY:
+        if kw in title_l:
             return False
     return True
 
 
 _device_cache: dict[str, bool] = {}
 _cond_cache: dict[str, int] = {}
+_assess_cache: dict[str, dict] = {}  # title → full assessment dict
 
 
 def ai_is_device(
@@ -100,7 +112,7 @@ def ai_is_device(
     try:
         if provider == "nvidia":
             from openai import OpenAI
-            client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key)
+            client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key, timeout=40, max_retries=0)
             resp = client.chat.completions.create(
                 model="meta/llama-3.1-8b-instruct",
                 messages=[{"role": "user", "content": prompt}],
@@ -269,11 +281,8 @@ def ai_assess_listing_batch(
 
     for i, (title, _) in enumerate(listings):
         key = title.strip().lower()[:100]
-        if key in _cond_cache:
-            # Rebuild full result from cached condition; other fields not cached → use defaults
-            d = default.copy()
-            d["condition"] = _cond_cache[key]
-            results[i] = d
+        if key in _assess_cache:
+            results[i] = _assess_cache[key].copy()
         else:
             uncached.append(i)
 
@@ -295,7 +304,9 @@ def ai_assess_listing_batch(
         "  condition: integer 0-5 "
         "(0=defekt/broken, 1=stark gebraucht/heavy wear, 2=gut/normal use, "
         "3=sehr gut/light scratches, 4=wie neu/barely used, 5=neu/sealed)\n"
-        "  functional: true if device works fully, false if broken/defective/needs repair\n"
+        "  functional: true ONLY if device is fully working AND has no significant physical damage. "
+        "Set false if: broken/cracked screen, cracked back glass/housing, water damage, "
+        "needs repair, not turning on, or any major defect mentioned.\n"
         "  battery_ok: true if battery >=81% or not mentioned, false if explicitly <81%\n"
         "  has_box: true if original box/OVP included\n"
         "  has_cable: true if original cable/charger included\n"
@@ -307,7 +318,7 @@ def ai_assess_listing_batch(
     try:
         if provider == "nvidia":
             from openai import OpenAI
-            client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key)
+            client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key, timeout=40, max_retries=0)
             resp = client.chat.completions.create(
                 model="meta/llama-3.1-8b-instruct",
                 messages=[
@@ -356,6 +367,7 @@ def ai_assess_listing_batch(
                 "has_cable":   bool(raw.get("has_cable", False)),
             }
             results[i] = d
+            _assess_cache[title.strip().lower()[:100]] = d
             _cond_cache[title.strip().lower()[:100]] = d["condition"]
 
     except Exception:
@@ -376,7 +388,7 @@ def _call_cond_llm(
     try:
         if provider == "nvidia":
             from openai import OpenAI
-            client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key)
+            client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key, timeout=40, max_retries=0)
             resp = client.chat.completions.create(
                 model="meta/llama-3.1-8b-instruct",
                 messages=[
@@ -447,8 +459,30 @@ COND_LABELS = {
 # ------------------------------------------------------------------ #
 _PATTERNS: list[tuple[int, list[str]]] = [
     (COND_BROKEN, [
-        "defekt", "kaputt", "gebrochen", "bruch", "riss", "display kaputt",
-        "display gebrochen", "broken", "fault", "repair",
+        # Multi-word phrases first — unambiguous, no false positives
+        "display kaputt", "display gebrochen", "display defekt", "display schaden",
+        "displayschaden", "schaden intern", "innerer schaden", "screen defekt",
+        "display problem", "touch defekt", "touch kaputt", "funktioniert nicht",
+        "rückseite gebrochen", "rückseite kaputt", "rückseite riss", "rückseite gesprungen",
+        "back cover kaputt", "back glass broken", "back glass cracked",
+        "hinten kaputt", "hinten gebrochen", "hinten riss",
+        "gehäuse kaputt", "gehäuse gebrochen", "rahmen gebrochen",
+        "hat einen riss", "hat risse", "hat einen bruch", "weist risse auf",
+        "glas gesprungen", "glas gebrochen", "glas kaputt",
+        # Single words — only safe ones that rarely appear negated
+        "defekt", "kaputt", "broken", "fault",
+        # Dutch (NL) — Vinted listings
+        "gaat niet meer aan", "werkt niet meer", "scherm kapot", "scherm gebarsten",
+        "scherm gebroken", "niet aan te zetten", "werkt niet",
+        # French (FR) — Vinted listings
+        "ne fonctionne plus", "ne s'allume plus", "écran cassé", "écran fissuré",
+        "ne marche plus", "en panne", "batterie à changer", "batterie a changer",
+        "batterie morte", "à réparer", "a reparer",
+        # Italian (IT) — Vinted listings
+        "non funziona", "schermo rotto", "vetro rotto", "rotto dietro",
+        "non si accende", "display rotto",
+        # "riss", "bruch", "gebrochen" removed — too many false positives with "kein Riss" etc.
+        # The AI handles these ambiguous cases correctly
     ]),
     (COND_NEW, [
         "originalverpackt", "versiegelt", "sealed", "brand new", "fabrikneu",
@@ -706,8 +740,8 @@ def _fetch_ebay_images(url: str) -> list[str]:
         return []
 
 
-def _fetch_ka_images(url: str) -> list[str]:
-    """Fetch Kleinanzeigen listing images via curl_cffi."""
+def _fetch_ka_details(url: str) -> tuple[list[str], str]:
+    """Fetch Kleinanzeigen listing images + description. Returns (images, description)."""
     try:
         from curl_cffi.requests import Session as CurlSession
         from bs4 import BeautifulSoup
@@ -719,48 +753,71 @@ def _fetch_ka_images(url: str) -> list[str]:
             src = img.get("src") or img.get("data-src", "")
             if "img.kleinanzeigen" in src or "ebayimg" in src:
                 imgs.append(_to_hires(src))
-        # Also check og:image
         og = soup.find("meta", property="og:image")
         if og and og.get("content"):
             imgs.insert(0, _to_hires(og["content"]))
-        return imgs
+        # Extract description
+        desc_el = soup.find(id="viewad-description-text")
+        description = desc_el.get_text(" ", strip=True) if desc_el else ""
+        return imgs, description
     except Exception:
-        return []
+        return [], ""
+
+
+def _fetch_ka_images(url: str) -> list[str]:
+    imgs, _ = _fetch_ka_details(url)
+    return imgs
+
+
+def _fetch_vinted_details(url: str) -> tuple[list[str], str]:
+    """Fetch Vinted listing images + description. Returns (images, description).
+
+    Vinted dropped __NEXT_DATA__ — description and photos are now embedded as
+    JSON strings within the main HTML bundle. We extract them via regex.
+    """
+    try:
+        from curl_cffi.requests import Session as CurlSession
+        import json as _json
+        with CurlSession(impersonate="chrome120") as s:
+            r = s.get(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "de-DE"}, timeout=15)
+
+        text = r.text
+        imgs: list[str] = []
+        description = ""
+
+        # ── Description ──────────────────────────────────────────────────
+        # Embedded as "description":"..." in a JSON blob in the HTML
+        m = re.search(r'"description":"((?:[^"\\]|\\.)*)"', text)
+        if m:
+            try:
+                description = _json.loads('"' + m.group(1) + '"')  # unescape JSON string
+            except Exception:
+                description = m.group(1).replace("\\n", "\n").replace('\\"', '"')
+
+        # ── Photos ───────────────────────────────────────────────────────
+        # Real listing photos come from images*.vinted.net CDN
+        full_urls = re.findall(r'"full_size_url":"([^"]+)"', text)
+        imgs = [u for u in full_urls if re.search(r"images\d*\.vinted\.", u)]
+
+        # Fallback: preload image links from images*.vinted.net
+        if not imgs:
+            preloads = re.findall(r'href="(https://images\d*\.vinted\.[^"]+)"', text)
+            imgs = list(dict.fromkeys(preloads))  # deduplicate, keep order
+
+        # Last resort: og:image (usually the main photo)
+        if not imgs:
+            og = re.search(r'property="og:image"[^>]*content="([^"]+images\d*\.vinted[^"]+)"', text)
+            if og:
+                imgs = [og.group(1)]
+
+        return imgs, description
+    except Exception:
+        return [], ""
 
 
 def _fetch_vinted_images(url: str) -> list[str]:
-    """Fetch Vinted listing images via curl_cffi."""
-    try:
-        from curl_cffi.requests import Session as CurlSession
-        from bs4 import BeautifulSoup
-        import json as _json
-        with CurlSession(impersonate="chrome120") as s:
-            r = s.get(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "de-DE"}, timeout=12)
-        soup = BeautifulSoup(r.text, "html.parser")
-        imgs = []
-        # Vinted embeds photos in __NEXT_DATA__ JSON
-        nd = soup.find("script", id="__NEXT_DATA__")
-        if nd:
-            try:
-                data = _json.loads(nd.string or "")
-                photos = (data.get("props", {})
-                              .get("pageProps", {})
-                              .get("item", {})
-                              .get("photos", []))
-                for p in photos:
-                    full = p.get("full_size_url") or p.get("url", "")
-                    if full:
-                        imgs.append(full)
-            except Exception:
-                pass
-        if not imgs:
-            for meta in soup.find_all("meta", property=re.compile(r"og:image")):
-                content = meta.get("content", "")
-                if content:
-                    imgs.append(content)
-        return imgs
-    except Exception:
-        return []
+    imgs, _ = _fetch_vinted_details(url)
+    return imgs
 
 
 def fetch_listing_images(listing_url: str, max_images: int = 6) -> list[str]:
@@ -847,17 +904,48 @@ def check_listing_images(
     return scores[len(scores) // 2]
 
 
+def _image_to_b64(image_url: str) -> str | None:
+    """Download an image and return base64 data URI. Required for URLs that
+    NVIDIA's servers can't fetch directly (e.g. eBay CDN images)."""
+    try:
+        import base64
+        from curl_cffi.requests import Session as CurlSession
+        with CurlSession(impersonate="chrome120") as s:
+            r = s.get(image_url, timeout=10, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "image/*",
+            })
+            if r.status_code != 200 or not r.content:
+                return None
+            mime = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            b64 = base64.b64encode(r.content).decode()
+            return f"data:{mime};base64,{b64}"
+    except Exception:
+        return None
+
+
 def _check_single_image(image_url: str, api_key: str) -> int | None:
-    """Call NVIDIA vision on a single image URL. Returns 0-5 or None."""
+    """Call NVIDIA vision on a single image URL. Downloads and base64-encodes
+    the image first so NVIDIA can access it regardless of CDN restrictions."""
     try:
         from openai import OpenAI
-        client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key)
+
+        data_uri = _image_to_b64(image_url)
+        if not data_uri:
+            return None
+
+        client = OpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=api_key,
+            timeout=30,  # hard timeout — never hang indefinitely
+            max_retries=0,
+        )
         resp = client.chat.completions.create(
             model=_VISION_MODEL,
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "image_url", "image_url": {"url": data_uri}},
                     {"type": "text", "text": (
                         "Look at this phone listing image. "
                         "Rate the physical condition of the device. "
@@ -896,6 +984,138 @@ def check_image_condition(image_url: str, api_key: str, provider: str = "nvidia"
     return score
 
 
+def quick_vision_score(
+    image_url: str | None,
+    listing_url: str | None,
+    api_key: str,
+    provider: str = "nvidia",
+    max_images: int = 3,
+) -> int | None:
+    """Kept for compatibility. Prefer ai_assess_listing_full()."""
+    result = ai_assess_listing_full(
+        title="", description="",
+        image_url=image_url, listing_url=listing_url,
+        api_key=api_key, provider=provider, max_images=max_images,
+    )
+    return result.get("condition") if result else None
+
+
+def ai_assess_listing_full(
+    title: str,
+    description: str,
+    image_url: str | None,
+    listing_url: str | None,
+    api_key: str,
+    provider: str = "nvidia",
+    max_images: int = 3,
+) -> dict | None:
+    """
+    Full listing assessment combining title, description AND photos in ONE call
+    to the vision model. Returns the same dict as ai_assess_listing_batch:
+        {condition, functional, battery_ok, has_box, has_cable}
+
+    This is the highest-reliability path — the model sees everything at once
+    and can catch contradictions (e.g. text says 'perfect' but photo shows cracks).
+
+    Falls back to None if vision is unavailable (no API key, wrong provider,
+    no images found). Caller should then use text-only batch assessment.
+    """
+    if not api_key or provider != "nvidia":
+        return None
+
+    import json as _json
+
+    # Fetch images + description from listing page
+    images: list[str] = []
+    fetched_desc = ""
+    if listing_url:
+        try:
+            if "kleinanzeigen.de" in listing_url:
+                images, fetched_desc = _fetch_ka_details(listing_url)
+            elif "vinted." in listing_url:
+                images, fetched_desc = _fetch_vinted_details(listing_url)
+            else:
+                images = fetch_listing_images(listing_url)
+        except Exception:
+            pass
+    if not images and image_url:
+        images = [_to_hires(image_url)]
+    if not images:
+        return None
+
+    # NVIDIA vision model supports at most 1 image per prompt
+    images = images[:1]
+
+    # Use fetched description if caller didn't provide one
+    if not description and fetched_desc:
+        description = fetched_desc
+
+    # Cache key: title + first image URL
+    cache_key = (title.strip().lower()[:80] + "|" + (images[0] if images else ""))
+    if cache_key in _assess_cache:
+        return _assess_cache[cache_key].copy()
+
+    # Build multimodal message: images first (base64-encoded), then text context
+    content: list[dict] = []
+    for img_url in images:
+        data_uri = _image_to_b64(img_url)
+        if data_uri:
+            content.append({"type": "image_url", "image_url": {"url": data_uri}})
+
+    if not content:
+        return None  # couldn't download any image
+
+    listing_text = f"Title: {title}"
+    if description:
+        listing_text += f"\nDescription: {description[:600]}"
+
+    content.append({"type": "text", "text": (
+        f"{listing_text}\n\n"
+        "You are evaluating a second-hand phone listing for resale arbitrage. "
+        "Look at ALL provided photos AND the title/description together.\n\n"
+        "Reply with ONLY a JSON object, no text before or after:\n"
+        '{"condition": <0-5>, "functional": <true/false>, '
+        '"battery_ok": <true/false>, "has_box": <true/false>, "has_cable": <true/false>}\n\n'
+        "Rules:\n"
+        "condition: 0=broken/cracked screen or body, 1=heavy scratches/dents, "
+        "2=normal wear visible, 3=light scratches only, 4=like new, 5=sealed/new\n"
+        "functional: false if ANY of these: cracked/broken screen, cracked back glass, "
+        "water damage, not turning on, needs repair, display damage mentioned\n"
+        "battery_ok: false only if description explicitly states battery <81%\n"
+        "has_box: true if original box/OVP mentioned\n"
+        "has_cable: true if original cable/charger mentioned\n"
+        "IMPORTANT: photos override text — if photos show damage not mentioned in text, "
+        "reflect that in condition and functional."
+    )})
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key, timeout=40, max_retries=0)
+        resp = client.chat.completions.create(
+            model=_VISION_MODEL,
+            messages=[{"role": "user", "content": content}],
+            temperature=0,
+            max_tokens=80,
+            stream=False,
+        )
+        text = resp.choices[0].message.content.strip()
+        m = re.search(r"\{[^}]+\}", text, re.DOTALL)
+        if not m:
+            return None
+        raw = _json.loads(m.group())
+        result = {
+            "condition":  max(0, min(5, int(raw.get("condition", COND_GOOD)))),
+            "functional": bool(raw.get("functional", True)),
+            "battery_ok": bool(raw.get("battery_ok", True)),
+            "has_box":    bool(raw.get("has_box", False)),
+            "has_cable":  bool(raw.get("has_cable", False)),
+        }
+        _assess_cache[cache_key] = result
+        return result
+    except Exception:
+        return None
+
+
 # ------------------------------------------------------------------ #
 # Worth-it decision                                                    #
 # ------------------------------------------------------------------ #
@@ -911,22 +1131,17 @@ def is_worth_it(
     fee_fixed: Decimal = Decimal("0.35"),
     min_profit: Decimal = Decimal("15"),
     min_roi: float = 0.15,
-    image_url: str | None = None,
-    listing_url: str | None = None,
-    api_key: str = "",
-    provider: str = "none",
     title: str = "",
     description: str = "",
+    api_key: str = "",
+    provider: str = "none",
+    # Legacy params kept for compat — vision is now handled upstream
+    image_url: str | None = None,
+    listing_url: str | None = None,
 ) -> tuple[bool, Decimal | None, float | None]:
     """
-    Determine if a listing is worth buying for arbitrage.
-
-    Flow:
-      1. Accessory filter (AI or regex)
-      2. ROI check with text-based condition score
-      3. If ROI positive → AI Vision checks ALL listing images
-         to confirm the physical condition isn't worse than described
-      4. If images show worse condition → recalculate with downgraded score
+    Pure ROI calculation given a pre-determined condition score.
+    Vision check is done BEFORE calling this, in profile_monitor.py.
 
     Returns (worth_it, net_profit, roi_pct).
     """
@@ -944,30 +1159,7 @@ def is_worth_it(
     net_profit = buyback - listing_price - shipping_cost - ebay_fees
     roi = float(net_profit / listing_price) if listing_price else None
 
-    # ROI gate — only proceed to image check if profitable on paper
     if net_profit < min_profit or (roi is not None and roi < min_roi):
         return False, net_profit, roi
-
-    # ── Image check (only when ROI is good) ─────────────────────────────
-    # Fetches ALL images from the listing page (up to 5), checks each
-    # with NVIDIA Vision, uses the median score.
-    # Only NVIDIA NIM supports vision; DeepSeek text-only → skip.
-    if api_key and provider == "nvidia":
-        img_score = check_listing_images(
-            listing_url=listing_url or "",
-            thumbnail_url=image_url,
-            api_key=api_key,
-            provider=provider,
-        )
-        if img_score is not None and img_score < condition_score - 1:
-            # Images reveal worse condition than described in text
-            downgraded = max(COND_BROKEN, img_score)
-            matched2 = matched_buyback_price(downgraded, zoxs_prices, wkfs_prices, clevertronic_prices)
-            buyback2 = best_buyback_price(matched2)
-            if buyback2:
-                net_profit = buyback2 - listing_price - shipping_cost - ebay_fees
-                roi = float(net_profit / listing_price)
-                if net_profit < min_profit or roi < min_roi:
-                    return False, net_profit, roi
 
     return True, net_profit, roi
