@@ -90,8 +90,12 @@ def parse_listings(html: str) -> list[Listing]:
         else:
             title = None
 
-        # Price: primary bold span (e.g. "EUR 224,00")
-        price_span = li.select_one("span.su-styled-text.primary.bold")
+        # Price: active listings use "primary bold", sold/completed listings use
+        # "positive strikethrough s-card__price". Try both selectors.
+        price_span = (
+            li.select_one("span.su-styled-text.primary.bold")
+            or li.select_one("span.s-card__price")
+        )
         price_text = price_span.get_text(" ", strip=True) if price_span else None
 
         if not link or not title or not price_text:
