@@ -46,8 +46,14 @@ _ACCESSORY_KEYWORDS = [
 # Keywords only checked in TITLE (not description) — too common in descriptions
 _TITLE_ONLY_ACCESSORY = [
     "hülle", "schutzglas", "kabel", "charger", "netzteil",
-    "adapter", "hub", "airpods", "reparatur service",
+    "adapter", "hub", "airpods",
+    "reparatur", "reparatur service", "diagnose",
     "gesucht", "wanted", "looking for", "zubehör", "zubehoer", "bundle",
+    # Display/glass/LCD parts — repair components, not phones
+    "display glas", "display lcd", "lcd display", "glas lcd", "lcd glas",
+    "displayglas", " lcd ", "displaytausch", "glasbruch",
+    # Ankauf / bulk buy listings — match many models → not a single-phone listing
+    "ankauf", "suche iphone", "kauf iphone",
 ]
 
 # Must contain at least one of these to be a real phone listing
@@ -55,10 +61,22 @@ _TITLE_ONLY_ACCESSORY = [
 _DEVICE_REQUIRED_ANY: list[str] = []
 
 
+import re as _re
+
+# Multi-model pattern: "11,12,13,14" or "11/12/13/14" or "(X,11,12,13)"
+# Repair shops and buy-back listings often list many models → not a single phone
+_MULTI_MODEL_PATTERN = _re.compile(
+    r'\b1[0-9]\s*[,/]\s*1[0-9]\s*[,/]\s*1[0-9]'  # e.g. 11,12,13 or 11/12/13
+    r'|\b(?:x|xs|xr)\s*[,/]\s*1[0-9]\s*[,/]\s*1[0-9]',  # e.g. X,11,12
+    _re.IGNORECASE,
+)
+
+
 def is_actual_device(title: str, description: str = "") -> bool:
     """
     Fast regex pre-filter: False if obvious accessory keyword found.
     Checks full text for _ACCESSORY_KEYWORDS, title-only for _TITLE_ONLY_ACCESSORY.
+    Also blocks multi-model listings (repair shops, bulk-buy ads).
     """
     title_l = title.lower()
     full_l = (title + " " + description[:500]).lower()
@@ -68,6 +86,9 @@ def is_actual_device(title: str, description: str = "") -> bool:
     for kw in _TITLE_ONLY_ACCESSORY:
         if kw in title_l:
             return False
+    # Block repair-shop / multi-buy listings that name 3+ models
+    if _MULTI_MODEL_PATTERN.search(title):
+        return False
     return True
 
 
@@ -752,7 +773,7 @@ def _fetch_ka_details(url: str) -> tuple[list[str], str]:
         from curl_cffi.requests import Session as CurlSession
         from bs4 import BeautifulSoup
         with CurlSession(impersonate="chrome120") as s:
-            r = s.get(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "de-DE"}, timeout=12)
+            r = s.get(url, headers={"Accept-Language": "de-DE,de;q=0.9"}, timeout=12)
         soup = BeautifulSoup(r.text, "html.parser")
         imgs = []
         for img in soup.find_all("img"):
@@ -785,7 +806,9 @@ def _fetch_vinted_details(url: str) -> tuple[list[str], str]:
         from curl_cffi.requests import Session as CurlSession
         import json as _json
         with CurlSession(impersonate="chrome120") as s:
-            r = s.get(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "de-DE"}, timeout=15)
+            # Do NOT override User-Agent — curl_cffi chrome120 impersonation
+            # sets the full browser fingerprint. Overriding breaks it.
+            r = s.get(url, headers={"Accept-Language": "de-DE,de;q=0.9"}, timeout=15)
 
         text = r.text
         imgs: list[str] = []

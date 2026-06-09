@@ -8,6 +8,7 @@ from pathlib import Path
 import concurrent.futures
 import json
 import re
+import threading
 from decimal import Decimal
 
 import requests
@@ -36,6 +37,15 @@ def scan_profiles(
     profiles = store.profiles(enabled_only=True)
     all_active = {}
     successful_profiles = 0
+
+    # Vinted description fetch state — shared across ALL profiles to avoid
+    # fetching the same URL multiple times (same listing can appear in several
+    # profiles, e.g. "iphone 13" and "iphone 13 pro").
+    _vinted_sem = threading.Lock()
+    _vinted_count = [0]   # mutable int shared across closures
+    _VINTED_PAGE_CAP = 40  # max unique Vinted page fetches per full scan
+    _vinted_cache: dict = {}  # url → (imgs, desc) — avoid duplicate fetches
+
     for profile in profiles:
         try:
             proxy_url = proxy_store.get(profile.id)
@@ -143,6 +153,9 @@ def scan_profiles(
             while len(assessments) < len(active):
                 assessments.append(default_assessment.copy())
 
+            # Semaphore: serialize Vinted page requests (bot-detection).
+            # Also tracks how many Vinted pages were fetched this scan —
+            # after ~20 fetches Vinted starts blocking; cap and use vision-only after.
             # ── Model-match guard ────────────────────────────────────────────
             # Extract required model tokens from the profile name so we can
             # reject listings that are a completely different device.
@@ -190,7 +203,14 @@ def scan_profiles(
                 _skip = {"detected_condition": "Defekt", "worth_it": False,
                          "condition_profit": None, "condition_roi": None}
                 try:
-                    # ── Guard 0: model mismatch ──────────────────────────────
+                    # ── Guard 0a: unrealistic price ──────────────────────────
+                    # Prices below €20 are placeholder/auction/error listings
+                    if not item.price or item.price < Decimal("20"):
+                        LOGGER.info("%s: SKIP (Preis zu niedrig €%s) — %s",
+                                    profile.name, item.price, item.title[:50])
+                        return item.link, _skip
+
+                    # ── Guard 0b: model mismatch ─────────────────────────────
                     if not _title_matches_profile(item.title):
                         LOGGER.info("%s: SKIP (falsches Modell) — %s",
                                     profile.name, item.title[:60])
@@ -199,20 +219,34 @@ def scan_profiles(
                     item_desc = getattr(item, "description", "") or ""
 
                     # ── Guard 1: fetch real description for KA/Vinted ────────
-                    if item.link:
+                    is_vinted = item.link and "vinted." in item.link
+                    is_ka = item.link and "kleinanzeigen.de" in item.link
+
+                    # ── Guard 1b: title-only regex (no network needed) ───────
+                    # Catch obvious title defects before spending a network request
+                    title_cond = detect_condition(item.title, description="")
+                    if title_cond == COND_BROKEN:
+                        LOGGER.info("%s: SKIP (defekt-keywords Titel) — %s",
+                                    profile.name, item.title[:60])
+                        return item.link, _skip
+
+                    # ── Guard 1c: fetch description (KA only; Vinted deferred) ──
+                    # KA descriptions are fetched upfront — no aggressive bot detection.
+                    # Vinted: description fetch is DEFERRED until after AI vision says
+                    # the listing looks promising. Vinted blocks IP after catalog fetch,
+                    # so we conserve the rate-limit budget for listings that pass vision.
+                    fetch_ok = False
+                    if item.link and is_ka:
                         try:
-                            if "kleinanzeigen.de" in item.link:
-                                _, fetched = _fetch_ka_details(item.link)
-                                if fetched:
-                                    item_desc = fetched
-                            elif "vinted." in item.link:
-                                _, fetched = _fetch_vinted_details(item.link)
-                                if fetched:
-                                    item_desc = fetched
+                            fetched_imgs, fetched_desc = _fetch_ka_details(item.link)
+                            if fetched_imgs or fetched_desc:
+                                if fetched_desc:
+                                    item_desc = fetched_desc
+                                fetch_ok = True
                         except Exception:
                             pass
 
-                    # ── Guard 2: regex hard-block (title + description) ──────
+                    # ── Guard 2: regex hard-block (title + description so far) ─
                     raw_cond = detect_condition(item.title, description=item_desc)
                     if raw_cond == COND_BROKEN:
                         LOGGER.info("%s: SKIP (defekt-keywords) — %s",
@@ -261,6 +295,45 @@ def scan_profiles(
                     # Fall back to text_assess (DeepSeek batch result or default)
                     if assess is None:
                         assess = text_assess
+
+                    # ── Guard 3b: Vinted deferred description fetch ───────────
+                    # Only for Vinted listings where vision says functional=True.
+                    # Fetches the real description for regex verification.
+                    # Serialized with a lock + cache to stay under Vinted's rate limit.
+                    if is_vinted and assess and assess.get("functional"):
+                        desc_fetched_ok = False
+                        with _vinted_sem:
+                            if item.link in _vinted_cache:
+                                cached_imgs, cached_desc = _vinted_cache[item.link]
+                                if cached_imgs or cached_desc:
+                                    if cached_desc:
+                                        item_desc = cached_desc
+                                    desc_fetched_ok = True
+                            elif _vinted_count[0] < _VINTED_PAGE_CAP:
+                                try:
+                                    import time as _time; _time.sleep(1)
+                                    fetched_imgs, fetched_desc = _fetch_vinted_details(item.link)
+                                    if fetched_imgs or fetched_desc:
+                                        _vinted_cache[item.link] = (fetched_imgs, fetched_desc)
+                                        if fetched_desc:
+                                            item_desc = fetched_desc
+                                        desc_fetched_ok = True
+                                    _vinted_count[0] += 1
+                                except Exception:
+                                    pass
+
+                        if not desc_fetched_ok:
+                            # Could not verify description — skip for safety.
+                            # Vision alone cannot detect "won't turn on" stated only in text.
+                            LOGGER.info("%s: SKIP (Vinted Beschreibung nicht verifizierbar) — %s",
+                                        profile.name, item.title[:60])
+                            return item.link, _skip
+
+                        # Re-run regex with the freshly fetched description
+                        if detect_condition(item.title, description=item_desc) == COND_BROKEN:
+                            LOGGER.info("%s: SKIP (defekt-keywords Beschreibung) — %s",
+                                        profile.name, item.title[:60])
+                            return item.link, _skip
 
                     # ── Guard 4: condition 0 → always non-functional ─────────
                     if assess.get("condition") == COND_BROKEN:
