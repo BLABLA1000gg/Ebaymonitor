@@ -13,6 +13,54 @@ from decimal import Decimal
 from typing import Any
 
 # ------------------------------------------------------------------ #
+# Accessory / non-device filter                                        #
+# ------------------------------------------------------------------ #
+
+# Keywords that indicate it's NOT the device itself
+_ACCESSORY_KEYWORDS = [
+    # Cases & covers
+    "hülle", "huelle", "case", "cover", "schutzhülle", "schutzhuelle",
+    "bumper", "handyhülle", "handyhuelle", "wallet case", "flip case",
+    "book case", "lederhülle", "silikonhülle", "tpu hülle",
+    # Screen protection
+    "schutzglas", "panzerglas", "folie", "screen protector", "displayschutz",
+    "schutzfolie", "glasfolie",
+    # Cables & chargers
+    "kabel", "ladekabel", "ladegerät", "charger", "netzteil", "usb",
+    "lightning kabel", "magsafe", "ladestation", "wireless charger",
+    "powerbank", "power bank",
+    # Accessories
+    "halter", "halterung", "ständer", "stand", "mount", "autohalter",
+    "kopfhörer", "kopfhoerer", "airpods", "earpods", "earbuds",
+    "adapter", "dongle", "hub",
+    # Spare parts / repairs
+    "ersatzteil", "display ersatz", "akku ersatz", "reparatur",
+    "gehäuse", "gehaeuse", "backcover", "back cover", "rückseite",
+    "flex kabel", "lautsprecher ersatz",
+    # Bundles with ambiguous pricing
+    "zubehör", "zubehoer", "bundle",
+    # Smartwatch / tablet confusion
+    "apple watch", "ipad", "airpods", "homepod",
+]
+
+# Must contain at least one of these to be a real phone listing
+# (empty = no positive requirement, just the blocklist above)
+_DEVICE_REQUIRED_ANY: list[str] = []
+
+
+def is_actual_device(title: str, description: str = "") -> bool:
+    """
+    Return True if the listing is an actual smartphone/device,
+    False if it's a case, charger, accessory, spare part, etc.
+    """
+    t = (title + " " + description[:300]).lower()
+    for kw in _ACCESSORY_KEYWORDS:
+        if kw in t:
+            return False
+    return True
+
+
+# ------------------------------------------------------------------ #
 # Normalized condition scale                                           #
 # ------------------------------------------------------------------ #
 COND_BROKEN     = 0
@@ -296,6 +344,8 @@ def is_worth_it(
     image_url: str | None = None,
     api_key: str = "",
     provider: str = "none",
+    title: str = "",
+    description: str = "",
 ) -> tuple[bool, Decimal | None, float | None]:
     """
     Determine if a listing is worth buying for arbitrage.
@@ -303,6 +353,10 @@ def is_worth_it(
     Returns (worth_it, net_profit, roi_pct).
     If ROI looks good AND image_url+api_key provided → also checks image condition.
     """
+    # Hard block: accessories, cases, chargers etc. are never worth it
+    if title and not is_actual_device(title, description):
+        return False, None, None
+
     matched = matched_buyback_price(condition_score, zoxs_prices, wkfs_prices, clevertronic_prices)
     buyback = best_buyback_price(matched)
 

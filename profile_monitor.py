@@ -136,6 +136,8 @@ def scan_profiles(
                     image_url=item.image_url,
                     api_key=api_key,
                     provider=provider,
+                    title=item.title,
+                    description="",
                 )
                 listing_extras[item.link] = {
                     "detected_condition": COND_LABELS.get(cond_score, "Gut"),
