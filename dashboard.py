@@ -7,18 +7,27 @@ from flask import Flask, jsonify, redirect, render_template, request, url_for
 from controller import MonitorController
 from profiles import SearchProfile
 from proxy import ProfileProxyStore, redact_proxy_url
+from settings import AppSettings, SettingsStore
 from storage import MonitorStore
 
 
 def create_app(database_path: str | Path | None = None) -> Flask:
     app = Flask(__name__)
     app.config["DATABASE_PATH"] = str(database_path or os.getenv("DATABASE_PATH", "ebay_monitor.db"))
+
+    with SettingsStore(app.config["DATABASE_PATH"]) as ss:
+        initial = ss.load()
+
     app.extensions["monitor_controller"] = MonitorController(
-        app.config["DATABASE_PATH"], int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
+        app.config["DATABASE_PATH"],
+        initial.check_interval_seconds,
     )
 
     def store():
         return MonitorStore(app.config["DATABASE_PATH"])
+
+    def settings_store():
+        return SettingsStore(app.config["DATABASE_PATH"])
 
     @app.get("/")
     def index():
@@ -48,6 +57,26 @@ def create_app(database_path: str | Path | None = None) -> Flask:
     @app.get("/api/monitor/status")
     def monitor_status():
         return jsonify(app.extensions["monitor_controller"].status())
+
+    @app.route("/settings", methods=["GET", "POST"])
+    def app_settings():
+        saved = False
+        with settings_store() as ss:
+            if request.method == "POST":
+                new_settings = AppSettings(
+                    discord_webhook_url=request.form.get("discord_webhook_url", "").strip(),
+                    check_interval_seconds=max(30, int(request.form.get("check_interval_seconds", "300") or 300)),
+                    notify_existing=request.form.get("notify_existing") == "on",
+                    notify_price_increases=request.form.get("notify_price_increases") == "on",
+                    notify_statistics=request.form.get("notify_statistics") == "on",
+                    browser_fetch=request.form.get("browser_fetch") == "on",
+                )
+                ss.save(new_settings)
+                # Apply new interval to running controller
+                app.extensions["monitor_controller"].interval_seconds = new_settings.check_interval_seconds
+                saved = True
+            current = ss.load()
+        return render_template("settings.html", s=current, saved=saved)
 
     @app.route("/profiles/new", methods=["GET", "POST"])
     @app.route("/profiles/<int:profile_id>", methods=["GET", "POST"])
@@ -109,4 +138,8 @@ def _decimal(value: str | None) -> Decimal | None:
 
 
 if __name__ == "__main__":
-    create_app().run(host=os.getenv("DASHBOARD_HOST", "127.0.0.1"), port=int(os.getenv("DASHBOARD_PORT", "5000")), debug=False)
+    create_app().run(
+        host=os.getenv("DASHBOARD_HOST", "127.0.0.1"),
+        port=int(os.getenv("DASHBOARD_PORT", "5000")),
+        debug=False,
+    )

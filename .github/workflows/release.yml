@@ -1,0 +1,115 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+            artifact: marketplace-monitor-linux
+          - os: windows-latest
+            name: windows
+            artifact: marketplace-monitor-windows.exe
+          - os: macos-latest
+            name: macos
+            artifact: marketplace-monitor-macos
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build executable (Linux / macOS)
+        if: matrix.os != 'windows-latest'
+        run: |
+          pyinstaller \
+            --onefile \
+            --name marketplace-monitor \
+            --add-data "templates:templates" \
+            --add-data "static:static" \
+            dashboard.py
+
+      - name: Build executable (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          pyinstaller `
+            --onefile `
+            --name marketplace-monitor `
+            --add-data "templates;templates" `
+            --add-data "static;static" `
+            dashboard.py
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          src="dist/marketplace-monitor"
+          [ "${{ matrix.os }}" = "windows-latest" ] && src="${src}.exe"
+          cp "$src" "${{ matrix.artifact }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            Download the binary for your platform — no Python required.
+
+            | Platform | File |
+            |---|---|
+            | Linux x86_64 | `marketplace-monitor-linux` |
+            | macOS (Intel + Apple Silicon) | `marketplace-monitor-macos` |
+            | Windows x64 | `marketplace-monitor-windows.exe` |
+
+            ### Run
+
+            **Linux / macOS**
+            ```bash
+            chmod +x marketplace-monitor-linux   # or -macos
+            ./marketplace-monitor-linux
+            ```
+            Open http://127.0.0.1:5000
+
+            **Windows**
+            Double-click `marketplace-monitor-windows.exe` or run from PowerShell:
+            ```powershell
+            .\marketplace-monitor-windows.exe
+            ```
+
+            ### First run
+            The app creates `ebay_monitor.db` in the current directory.
+            Configure search profiles and notifications at http://127.0.0.1:5000 → Settings.

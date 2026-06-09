@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Settings — Marketplace Monitor</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='controls.css') }}">
+</head>
+<body>
+<header>
+  <div>
+    <p class="eyebrow">CONFIGURATION</p>
+    <h1>Settings</h1>
+  </div>
+  <a href="{{ url_for('index') }}">Back to dashboard</a>
+</header>
+
+<main>
+  {% if saved %}
+  <div class="notice success">Settings saved.</div>
+  {% endif %}
+
+  <form class="form" method="post">
+
+    <h2 class="wide section-heading">Notifications</h2>
+
+    <label class="wide">
+      Discord webhook URL
+      <input type="url" name="discord_webhook_url"
+             value="{{ s.discord_webhook_url }}"
+             placeholder="https://discord.com/api/webhooks/...">
+      <span class="hint">Leave blank to disable Discord notifications.</span>
+    </label>
+
+    <label class="check wide">
+      <input type="checkbox" name="notify_existing" {% if s.notify_existing %}checked{% endif %}>
+      Notify about listings that already exist on the first scan
+    </label>
+
+    <label class="check wide">
+      <input type="checkbox" name="notify_price_increases" {% if s.notify_price_increases %}checked{% endif %}>
+      Notify when a price increases (not just drops)
+    </label>
+
+    <label class="check wide">
+      <input type="checkbox" name="notify_statistics" {% if s.notify_statistics %}checked{% endif %}>
+      Send a sold-price statistics summary after each eBay scan
+    </label>
+
+    <h2 class="wide section-heading">Scanning</h2>
+
+    <label>
+      Scan interval (seconds)
+      <input type="number" name="check_interval_seconds" min="30" max="86400"
+             value="{{ s.check_interval_seconds }}">
+      <span class="hint">Minimum 30 s. Default 300 s (5 min).</span>
+    </label>
+
+    <label class="check wide">
+      <input type="checkbox" name="browser_fetch" {% if s.browser_fetch %}checked{% endif %}>
+      Use Chromium for fetching (BROWSER_FETCH)
+      <span class="hint">
+        Falls back to curl_cffi Chrome impersonation when unchecked.
+        Enable this if eBay still returns 403 on your IP.
+        Requires <code>playwright install chromium</code>.
+      </span>
+    </label>
+
+    <div class="actions wide">
+      <button class="button" type="submit">Save settings</button>
+    </div>
+
+  </form>
+</main>
+</body>
+</html>
