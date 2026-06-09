@@ -141,6 +141,28 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         with store() as database:
             return jsonify(database.price_history(request.args["link"]))
 
+    @app.get("/api/buyback/search")
+    def buyback_search():
+        """Search all buyback/refurbished sites by keyword. Returns grouped results."""
+        from buyback_search import search_wirkaufens, search_zoxs, search_clevertronic
+        import concurrent.futures
+
+        q = request.args.get("q", "").strip()
+        if len(q) < 3:
+            return jsonify({"wirkaufens": [], "zoxs": [], "clevertronic": []})
+
+        # Run all three searches in parallel threads
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+            wkfs_f = ex.submit(search_wirkaufens, q)
+            zoxs_f = ex.submit(search_zoxs, q)
+            ct_f   = ex.submit(search_clevertronic, q)
+
+        return jsonify({
+            "wirkaufens":   wkfs_f.result(),
+            "zoxs":         zoxs_f.result(),
+            "clevertronic": ct_f.result(),
+        })
+
     return app
 
 

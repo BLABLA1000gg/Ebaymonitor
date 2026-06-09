@@ -1,11 +1,284 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Search profile</title><link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"></head><body>
-<header><div><p class="eyebrow">CONFIGURATION</p><h1>{{ 'Edit' if profile else 'New' }} search profile</h1></div><a href="{{ url_for('index') }}">Back to dashboard</a></header><main><form class="form" method="post">
-<label>Name<input required name="name" value="{{ profile.name if profile else '' }}"></label><label class="wide">Search URL (eBay, Kleinanzeigen or Vinted)<input required type="url" name="ebay_url" value="{{ profile.ebay_url if profile else '' }}"></label><label class="wide">eBay reference URL for flip profit (optional)<input type="url" name="ebay_reference_url" value="{{ profile.ebay_reference_url if profile and profile.ebay_reference_url else '' }}" placeholder="https://www.ebay.de/sch/i.html?_nkw=iphone+12"><span style="color:var(--muted);font-size:.85em">For Kleinanzeigen / Vinted profiles: enter an eBay search URL to compare prices and show estimated flip profit after eBay fees &amp; shipping.</span></label><label class="wide">Clevertronic URL for condition prices (optional)<input type="url" name="clevertronic_url" value="{{ profile.clevertronic_url if profile and profile.clevertronic_url else '' }}" placeholder="https://www.clevertronic.de/kaufen/handy-kaufen/apple/iphone-12"><span style="color:var(--muted);font-size:.85em">Sell prices per condition (what Clevertronic charges). Useful for quick-sell arbitrage comparison.</span></label><label class="wide">ZOXS URL for Ankaufpreise (optional)<input type="url" name="zoxs_url" value="{{ profile.zoxs_url if profile and profile.zoxs_url else '' }}" placeholder="https://www.zoxs.de/verkaufen/iphone-12-ankauf/B08L5TNKZC.html"><span style="color:var(--muted);font-size:.85em">Buy prices per condition (what ZOXS pays you instantly). Find your model's URL at zoxs.de/verkaufen/apple-iphone-ankauf.html.</span></label><label class="wide">WirKaufens URL for Ankaufpreise (optional)<input type="url" name="wirkaufens_url" value="{{ profile.wirkaufens_url if profile and profile.wirkaufens_url else '' }}" placeholder="https://wirkaufens.de/produkte/apple-iphone-12-128-gb"><span style="color:var(--muted);font-size:.85em">Buy prices per condition (what WirKaufens pays you). Find via wirkaufens.de → Handys → Apple → model → 128 GB.</span></label>
-<label>Required keywords<input name="include_keywords" value="{{ profile.include_keywords if profile else '' }}"></label><label>Excluded keywords<input name="exclude_keywords" value="{{ profile.exclude_keywords if profile else '' }}"></label>
-<label>Minimum price<input type="number" step="0.01" name="min_price" value="{{ profile.min_price if profile and profile.min_price is not none else '' }}"></label><label>Maximum price<input type="number" step="0.01" name="max_price" value="{{ profile.max_price if profile and profile.max_price is not none else '' }}"></label>
-<label>Currency<select name="currency"><option value="">Any</option>{% for value in ['EUR','USD','GBP'] %}<option {% if profile and profile.currency == value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select></label><label>Sold-history window (days)<input type="number" min="1" max="365" name="sold_window_days" value="{{ profile.sold_window_days if profile else 90 }}"></label>
-<label class="wide">New proxy URL (optional)<input type="password" autocomplete="new-password" name="proxy_url" value="" placeholder="socks5h://user:password@host:1080"></label>
-<p class="wide" style="color:var(--muted)">{% if proxy_configured %}Configured: <code>{{ proxy_display }}</code>. Leave blank to keep it.{% else %}No proxy configured. Supported: HTTP, HTTPS, SOCKS5 and SOCKS5h.{% endif %}</p>
-{% if proxy_configured %}<label class="check wide"><input type="checkbox" name="clear_proxy"> Remove configured proxy</label>{% endif %}
-<label class="check"><input type="checkbox" name="enabled" {% if not profile or profile.enabled %}checked{% endif %}> Enable monitoring</label><div class="actions wide"><button class="button" type="submit">Save profile</button></div></form>
-{% if profile %}<form class="danger-zone" action="{{ url_for('delete_profile', profile_id=profile.id) }}" method="post"><button class="danger" type="submit">Delete profile</button></form>{% endif %}</main></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Search profile</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <style>
+    .buyback-search { position: relative; }
+    .buyback-search input[type="text"] { width: 100%; }
+    .buyback-dropdown {
+      position: absolute; top: 100%; left: 0; right: 0; z-index: 100;
+      background: #151e2c; border: 1px solid var(--line); border-radius: 10px;
+      max-height: 260px; overflow-y: auto; margin-top: 4px;
+      box-shadow: 0 8px 24px #00000066;
+    }
+    .buyback-dropdown.hidden { display: none; }
+    .buyback-option {
+      padding: 10px 14px; cursor: pointer; display: flex; align-items: center; gap: 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    .buyback-option:last-child { border-bottom: none; }
+    .buyback-option:hover, .buyback-option.active { background: #1e2d40; }
+    .buyback-option .site-tag {
+      font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+      padding: 2px 6px; border-radius: 4px; flex-shrink: 0;
+    }
+    .site-tag.wirkaufens { background: #f4b86022; color: #f4b860; }
+    .site-tag.zoxs       { background: #7c8cff22; color: #7c8cff; }
+    .site-tag.clevertronic { background: #55d6be22; color: #55d6be; }
+    .buyback-option .opt-name { font-size: 13px; color: var(--text); }
+    .buyback-selected {
+      display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; min-height: 28px;
+    }
+    .buyback-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px; border-radius: 999px; font-size: 12px;
+    }
+    .buyback-chip.wirkaufens { background: #f4b86022; color: #f4b860; border: 1px solid #f4b86044; }
+    .buyback-chip.zoxs       { background: #7c8cff22; color: #7c8cff; border: 1px solid #7c8cff44; }
+    .buyback-chip.clevertronic { background: #55d6be22; color: #55d6be; border: 1px solid #55d6be44; }
+    .buyback-chip button {
+      background: none; border: none; padding: 0; cursor: pointer;
+      color: inherit; opacity: .7; font-size: 14px; line-height: 1;
+    }
+    .buyback-chip button:hover { opacity: 1; }
+    .search-loading { color: var(--muted); font-size: 12px; padding: 10px 14px; }
+    .no-results { color: var(--muted); font-size: 12px; padding: 10px 14px; }
+  </style>
+</head>
+<body>
+<header>
+  <div><p class="eyebrow">CONFIGURATION</p><h1>{{ 'Edit' if profile else 'New' }} search profile</h1></div>
+  <a href="{{ url_for('index') }}">Back to dashboard</a>
+</header>
+<main>
+<form class="form" method="post" id="profile-form">
+
+  <label>Name
+    <input required name="name" value="{{ profile.name if profile else '' }}">
+  </label>
+
+  <label class="wide">Search URL (eBay, Kleinanzeigen or Vinted)
+    <input required type="url" name="ebay_url" value="{{ profile.ebay_url if profile else '' }}">
+  </label>
+
+  <label class="wide">eBay reference URL for flip profit (optional)
+    <input type="url" name="ebay_reference_url"
+           value="{{ profile.ebay_reference_url if profile and profile.ebay_reference_url else '' }}"
+           placeholder="https://www.ebay.de/sch/i.html?_nkw=iphone+12">
+    <span style="color:var(--muted);font-size:.85em">
+      For Kleinanzeigen / Vinted profiles: eBay search URL to show estimated flip profit after fees &amp; shipping.
+    </span>
+  </label>
+
+  <!-- Buyback arbitrage section -->
+  <div class="wide" style="margin-top:4px">
+    <p style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px;border-bottom:1px solid var(--line);padding-bottom:10px">
+      Arbitrage — Buyback &amp; Refurbished prices
+    </p>
+
+    <label style="color:var(--muted);font-size:12px;display:block;margin-bottom:6px">
+      Search products across ZOXS, WirKaufens &amp; Clevertronic
+    </label>
+
+    <div class="buyback-search">
+      <input type="text" id="buyback-query"
+             placeholder="z.B. iPhone 12 128GB — Ergebnisse erscheinen beim Tippen"
+             autocomplete="off">
+      <div class="buyback-dropdown hidden" id="buyback-dropdown"></div>
+    </div>
+
+    <div class="buyback-selected" id="buyback-selected"></div>
+
+    <!-- Hidden fields that get submitted -->
+    <input type="hidden" name="clevertronic_url" id="field-clevertronic"
+           value="{{ profile.clevertronic_url if profile and profile.clevertronic_url else '' }}">
+    <input type="hidden" name="zoxs_url" id="field-zoxs"
+           value="{{ profile.zoxs_url if profile and profile.zoxs_url else '' }}">
+    <input type="hidden" name="wirkaufens_url" id="field-wirkaufens"
+           value="{{ profile.wirkaufens_url if profile and profile.wirkaufens_url else '' }}">
+  </div>
+
+  <label>Required keywords
+    <input name="include_keywords" value="{{ profile.include_keywords if profile else '' }}">
+  </label>
+  <label>Excluded keywords
+    <input name="exclude_keywords" value="{{ profile.exclude_keywords if profile else '' }}">
+  </label>
+
+  <label>Minimum price
+    <input type="number" step="0.01" name="min_price"
+           value="{{ profile.min_price if profile and profile.min_price is not none else '' }}">
+  </label>
+  <label>Maximum price
+    <input type="number" step="0.01" name="max_price"
+           value="{{ profile.max_price if profile and profile.max_price is not none else '' }}">
+  </label>
+
+  <label>Currency
+    <select name="currency">
+      <option value="">Any</option>
+      {% for value in ['EUR','USD','GBP'] %}
+      <option {% if profile and profile.currency == value %}selected{% endif %}>{{ value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Sold-history window (days)
+    <input type="number" min="1" max="365" name="sold_window_days"
+           value="{{ profile.sold_window_days if profile else 90 }}">
+  </label>
+
+  <label class="wide">New proxy URL (optional)
+    <input type="password" autocomplete="new-password" name="proxy_url" value=""
+           placeholder="socks5h://user:password@host:1080">
+  </label>
+  <p class="wide" style="color:var(--muted)">
+    {% if proxy_configured %}
+      Configured: <code>{{ proxy_display }}</code>. Leave blank to keep it.
+    {% else %}
+      No proxy configured. Supported: HTTP, HTTPS, SOCKS5 and SOCKS5h.
+    {% endif %}
+  </p>
+  {% if proxy_configured %}
+  <label class="check wide"><input type="checkbox" name="clear_proxy"> Remove configured proxy</label>
+  {% endif %}
+
+  <label class="check">
+    <input type="checkbox" name="enabled" {% if not profile or profile.enabled %}checked{% endif %}>
+    Enable monitoring
+  </label>
+
+  <div class="actions wide">
+    <button class="button" type="submit">Save profile</button>
+  </div>
+</form>
+
+{% if profile %}
+<form class="danger-zone" action="{{ url_for('delete_profile', profile_id=profile.id) }}" method="post">
+  <button class="danger" type="submit">Delete profile</button>
+</form>
+{% endif %}
+</main>
+
+<script>
+// Pre-populate chips from existing saved URLs
+const SITE_LABELS = {
+  wirkaufens: 'WirKaufens',
+  zoxs: 'ZOXS',
+  clevertronic: 'Clevertronic'
+};
+
+const fields = {
+  wirkaufens:   document.getElementById('field-wirkaufens'),
+  zoxs:         document.getElementById('field-zoxs'),
+  clevertronic: document.getElementById('field-clevertronic'),
+};
+
+// Extract a readable name from a stored URL
+function nameFromUrl(site, url) {
+  if (!url) return '';
+  try {
+    const path = new URL(url).pathname;
+    const slug = path.split('/').pop() || path.split('/').slice(-2).join('/');
+    return slug.replace(/-/g, ' ').replace(/\.html$/, '');
+  } catch { return url; }
+}
+
+function renderChips() {
+  const container = document.getElementById('buyback-selected');
+  container.innerHTML = '';
+  for (const [site, field] of Object.entries(fields)) {
+    if (!field.value) continue;
+    const chip = document.createElement('span');
+    chip.className = `buyback-chip ${site}`;
+    chip.innerHTML = `<span class="site-tag ${site}">${SITE_LABELS[site]}</span>
+      <span>${nameFromUrl(site, field.value)}</span>
+      <button type="button" data-site="${site}" title="Remove">✕</button>`;
+    chip.querySelector('button').addEventListener('click', () => {
+      fields[site].value = '';
+      renderChips();
+    });
+    container.appendChild(chip);
+  }
+}
+
+renderChips();
+
+// Autocomplete
+let debounceTimer;
+const input   = document.getElementById('buyback-query');
+const dropdown = document.getElementById('buyback-dropdown');
+let activeIdx = -1;
+let allOptions = [];
+
+input.addEventListener('input', () => {
+  clearTimeout(debounceTimer);
+  const q = input.value.trim();
+  if (q.length < 3) { dropdown.classList.add('hidden'); return; }
+  debounceTimer = setTimeout(() => doSearch(q), 350);
+});
+
+input.addEventListener('keydown', (e) => {
+  const opts = dropdown.querySelectorAll('.buyback-option');
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    activeIdx = Math.min(activeIdx + 1, opts.length - 1);
+    opts.forEach((o, i) => o.classList.toggle('active', i === activeIdx));
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    activeIdx = Math.max(activeIdx - 1, 0);
+    opts.forEach((o, i) => o.classList.toggle('active', i === activeIdx));
+  } else if (e.key === 'Enter' && activeIdx >= 0) {
+    e.preventDefault();
+    opts[activeIdx].click();
+  } else if (e.key === 'Escape') {
+    dropdown.classList.add('hidden');
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.buyback-search')) dropdown.classList.add('hidden');
+});
+
+async function doSearch(q) {
+  dropdown.innerHTML = '<div class="search-loading">Suche läuft…</div>';
+  dropdown.classList.remove('hidden');
+  activeIdx = -1;
+
+  try {
+    const res = await fetch(`/api/buyback/search?q=${encodeURIComponent(q)}`);
+    const data = await res.json();
+
+    allOptions = [];
+    ['wirkaufens', 'zoxs', 'clevertronic'].forEach(site => {
+      (data[site] || []).forEach(item => allOptions.push({site, ...item}));
+    });
+
+    if (!allOptions.length) {
+      dropdown.innerHTML = '<div class="no-results">Keine Ergebnisse</div>';
+      return;
+    }
+
+    dropdown.innerHTML = '';
+    allOptions.forEach((opt, i) => {
+      const div = document.createElement('div');
+      div.className = 'buyback-option';
+      div.innerHTML = `<span class="site-tag ${opt.site}">${SITE_LABELS[opt.site]}</span>
+                       <span class="opt-name">${opt.name}</span>`;
+      div.addEventListener('click', () => {
+        fields[opt.site].value = opt.url;
+        renderChips();
+        dropdown.classList.add('hidden');
+        input.value = '';
+      });
+      dropdown.appendChild(div);
+    });
+  } catch {
+    dropdown.innerHTML = '<div class="no-results">Fehler beim Laden</div>';
+  }
+}
+</script>
+</body>
+</html>
