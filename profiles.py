@@ -1,5 +1,7 @@
 from __future__ import annotations
-from dataclasses import dataclass
+import re
+import urllib.parse
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from filters import ListingFilter, parse_csv_words
@@ -31,6 +33,10 @@ class SearchProfile:
     # Optional WirKaufens product URL for Ankaufpreise.
     # e.g. https://wirkaufens.de/produkte/apple-iphone-12-128-gb
     wirkaufens_url: str | None = None
+    # Buyback platforms to search automatically (new flow).
+    # List of platform keys: ["zoxs", "wirkaufens", "clevertronic"]
+    # When set, overrides the individual *_url fields above.
+    buyback_platforms: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         object.__setattr__(self, "proxy_url", validate_proxy_url(self.proxy_url))
@@ -48,3 +54,19 @@ class SearchProfile:
     @property
     def keyword_signature(self) -> str:
         return self.include_keywords.strip().casefold()
+
+    @property
+    def ebay_search_keyword(self) -> str:
+        """Extract the search keyword from the eBay (or KA/Vinted) search URL."""
+        try:
+            parsed = urllib.parse.urlparse(self.ebay_url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            # eBay: _nkw, Kleinanzeigen: query, Vinted: search_text
+            for param in ("_nkw", "query", "search_text", "q"):
+                if param in qs:
+                    return urllib.parse.unquote_plus(qs[param][0])
+            # Fallback: slug from path
+            slug = parsed.path.strip("/").split("/")[-1]
+            return slug.replace("-", " ").replace("+", " ")
+        except Exception:
+            return self.include_keywords

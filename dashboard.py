@@ -78,6 +78,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     browser_fetch=request.form.get("browser_fetch") == "on",
                     shipping_cost_eur=max(0.0, float(request.form.get("shipping_cost_eur") or 5.0)),
                     ebay_fee_rate=max(0.0, min(1.0, float(request.form.get("ebay_fee_rate") or 0.1235))),
+                    deepseek_api_key=request.form.get("deepseek_api_key", "").strip(),
                 )
                 ss.save(new_settings)
                 # Apply new interval to running controller
@@ -96,6 +97,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                 ct_url = request.form.get("clevertronic_url", "").strip() or None
                 zoxs_url_val = request.form.get("zoxs_url", "").strip() or None
                 wkfs_url_val = request.form.get("wirkaufens_url", "").strip() or None
+                buyback_platforms = request.form.getlist("buyback_platforms")
                 profile = SearchProfile(
                     id=profile_id, name=request.form["name"].strip(),
                     ebay_url=request.form["ebay_url"].strip(),
@@ -110,6 +112,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     clevertronic_url=ct_url,
                     zoxs_url=zoxs_url_val,
                     wirkaufens_url=wkfs_url_val,
+                    buyback_platforms=buyback_platforms,
                 )
                 saved_id = database.save_profile(profile)
                 new_proxy = request.form.get("proxy_url", "").strip()

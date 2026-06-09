@@ -6,46 +6,35 @@
   <title>Search profile</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <style>
-    .buyback-search { position: relative; }
-    .buyback-search input[type="text"] { width: 100%; }
-    .buyback-dropdown {
-      position: absolute; top: 100%; left: 0; right: 0; z-index: 100;
-      background: #151e2c; border: 1px solid var(--line); border-radius: 10px;
-      max-height: 260px; overflow-y: auto; margin-top: 4px;
-      box-shadow: 0 8px 24px #00000066;
+    .platform-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 8px;
     }
-    .buyback-dropdown.hidden { display: none; }
-    .buyback-option {
-      padding: 10px 14px; cursor: pointer; display: flex; align-items: center; gap: 10px;
-      border-bottom: 1px solid var(--line);
+    .platform-card {
+      border: 2px solid var(--line); border-radius: 10px; padding: 14px 16px;
+      cursor: pointer; transition: border-color .15s, background .15s;
+      display: flex; align-items: center; gap: 10px;
     }
-    .buyback-option:last-child { border-bottom: none; }
-    .buyback-option:hover, .buyback-option.active { background: #1e2d40; }
-    .buyback-option .site-tag {
-      font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
-      padding: 2px 6px; border-radius: 4px; flex-shrink: 0;
+    .platform-card:hover { border-color: #3a4d62; background: #151e2c; }
+    .platform-card.selected { background: #151e2c; }
+    .platform-card.selected.wirkaufens { border-color: #f4b860; }
+    .platform-card.selected.zoxs       { border-color: #7c8cff; }
+    .platform-card.selected.clevertronic { border-color: #55d6be; }
+    .platform-card input[type="checkbox"] { display: none; }
+    .platform-card .dot {
+      width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0;
+      border: 2px solid #3a4d62; transition: border-color .15s, background .15s;
     }
-    .site-tag.wirkaufens { background: #f4b86022; color: #f4b860; }
-    .site-tag.zoxs       { background: #7c8cff22; color: #7c8cff; }
-    .site-tag.clevertronic { background: #55d6be22; color: #55d6be; }
-    .buyback-option .opt-name { font-size: 13px; color: var(--text); }
-    .buyback-selected {
-      display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; min-height: 28px;
+    .platform-card.selected.wirkaufens   .dot { background: #f4b860; border-color: #f4b860; }
+    .platform-card.selected.zoxs         .dot { background: #7c8cff; border-color: #7c8cff; }
+    .platform-card.selected.clevertronic .dot { background: #55d6be; border-color: #55d6be; }
+    .platform-name { font-size: 13px; font-weight: 600; }
+    .platform-hint { font-size: 11px; color: var(--muted); }
+    .keyword-preview {
+      margin-top: 8px; padding: 8px 12px; border-radius: 8px;
+      background: #0d1520; border: 1px solid var(--line);
+      font-size: 12px; color: var(--muted);
     }
-    .buyback-chip {
-      display: inline-flex; align-items: center; gap: 6px;
-      padding: 4px 10px; border-radius: 999px; font-size: 12px;
-    }
-    .buyback-chip.wirkaufens { background: #f4b86022; color: #f4b860; border: 1px solid #f4b86044; }
-    .buyback-chip.zoxs       { background: #7c8cff22; color: #7c8cff; border: 1px solid #7c8cff44; }
-    .buyback-chip.clevertronic { background: #55d6be22; color: #55d6be; border: 1px solid #55d6be44; }
-    .buyback-chip button {
-      background: none; border: none; padding: 0; cursor: pointer;
-      color: inherit; opacity: .7; font-size: 14px; line-height: 1;
-    }
-    .buyback-chip button:hover { opacity: 1; }
-    .search-loading { color: var(--muted); font-size: 12px; padding: 10px 14px; }
-    .no-results { color: var(--muted); font-size: 12px; padding: 10px 14px; }
+    .keyword-preview strong { color: var(--text); }
   </style>
 </head>
 <body>
@@ -76,29 +65,52 @@
   <!-- Buyback arbitrage section -->
   <div class="wide" style="margin-top:4px">
     <p style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px;border-bottom:1px solid var(--line);padding-bottom:10px">
-      Arbitrage — Buyback &amp; Refurbished prices
+      Arbitrage — Buyback &amp; Ankauf Plattformen
     </p>
 
-    <label style="color:var(--muted);font-size:12px;display:block;margin-bottom:6px">
-      Search products across ZOXS, WirKaufens &amp; Clevertronic
+    <label style="color:var(--muted);font-size:12px;display:block;margin-bottom:10px">
+      Wähle auf welchen Plattformen automatisch nach Ankaufpreisen gesucht werden soll.
+      Das Keyword wird automatisch aus der Such-URL extrahiert.
     </label>
 
-    <div class="buyback-search">
-      <input type="text" id="buyback-query"
-             placeholder="z.B. iPhone 12 128GB — Ergebnisse erscheinen beim Tippen"
-             autocomplete="off">
-      <div class="buyback-dropdown hidden" id="buyback-dropdown"></div>
+    {% set active_platforms = profile.buyback_platforms if profile and profile.buyback_platforms else [] %}
+
+    <div class="platform-grid">
+      <label class="platform-card zoxs {% if 'zoxs' in active_platforms %}selected{% endif %}">
+        <input type="checkbox" name="buyback_platforms" value="zoxs"
+               {% if 'zoxs' in active_platforms %}checked{% endif %}>
+        <span class="dot"></span>
+        <div>
+          <div class="platform-name" style="color:#7c8cff">ZOXS</div>
+          <div class="platform-hint">Ankauf · alle Zustände</div>
+        </div>
+      </label>
+
+      <label class="platform-card wirkaufens {% if 'wirkaufens' in active_platforms %}selected{% endif %}">
+        <input type="checkbox" name="buyback_platforms" value="wirkaufens"
+               {% if 'wirkaufens' in active_platforms %}checked{% endif %}>
+        <span class="dot"></span>
+        <div>
+          <div class="platform-name" style="color:#f4b860">WirKaufens</div>
+          <div class="platform-hint">Ankauf · alle Zustände</div>
+        </div>
+      </label>
+
+      <label class="platform-card clevertronic {% if 'clevertronic' in active_platforms %}selected{% endif %}">
+        <input type="checkbox" name="buyback_platforms" value="clevertronic"
+               {% if 'clevertronic' in active_platforms %}checked{% endif %}>
+        <span class="dot"></span>
+        <div>
+          <div class="platform-name" style="color:#55d6be">Clevertronic</div>
+          <div class="platform-hint">Refurbished Verkauf</div>
+        </div>
+      </label>
     </div>
 
-    <div class="buyback-selected" id="buyback-selected"></div>
-
-    <!-- Hidden fields that get submitted -->
-    <input type="hidden" name="clevertronic_url" id="field-clevertronic"
-           value="{{ profile.clevertronic_url if profile and profile.clevertronic_url else '' }}">
-    <input type="hidden" name="zoxs_url" id="field-zoxs"
-           value="{{ profile.zoxs_url if profile and profile.zoxs_url else '' }}">
-    <input type="hidden" name="wirkaufens_url" id="field-wirkaufens"
-           value="{{ profile.wirkaufens_url if profile and profile.wirkaufens_url else '' }}">
+    <div class="keyword-preview" id="keyword-preview">
+      Keyword aus URL: <strong id="kw-display">—</strong>
+      <span style="margin-left:8px;opacity:.5;font-size:11px">wird beim Scan automatisch erkannt</span>
+    </div>
   </div>
 
   <label>Required keywords
@@ -163,121 +175,40 @@
 </main>
 
 <script>
-// Pre-populate chips from existing saved URLs
-const SITE_LABELS = {
-  wirkaufens: 'WirKaufens',
-  zoxs: 'ZOXS',
-  clevertronic: 'Clevertronic'
-};
+// Platform card toggle
+document.querySelectorAll('.platform-card').forEach(card => {
+  card.addEventListener('click', () => {
+    const cb = card.querySelector('input[type="checkbox"]');
+    // toggling happens naturally via label, just sync class
+    setTimeout(() => {
+      card.classList.toggle('selected', cb.checked);
+    }, 0);
+  });
+});
 
-const fields = {
-  wirkaufens:   document.getElementById('field-wirkaufens'),
-  zoxs:         document.getElementById('field-zoxs'),
-  clevertronic: document.getElementById('field-clevertronic'),
-};
-
-// Extract a readable name from a stored URL
-function nameFromUrl(site, url) {
-  if (!url) return '';
+// Auto-extract keyword from eBay URL field
+function extractKeyword(url) {
   try {
-    const path = new URL(url).pathname;
-    const slug = path.split('/').pop() || path.split('/').slice(-2).join('/');
-    return slug.replace(/-/g, ' ').replace(/\.html$/, '');
-  } catch { return url; }
-}
-
-function renderChips() {
-  const container = document.getElementById('buyback-selected');
-  container.innerHTML = '';
-  for (const [site, field] of Object.entries(fields)) {
-    if (!field.value) continue;
-    const chip = document.createElement('span');
-    chip.className = `buyback-chip ${site}`;
-    chip.innerHTML = `<span class="site-tag ${site}">${SITE_LABELS[site]}</span>
-      <span>${nameFromUrl(site, field.value)}</span>
-      <button type="button" data-site="${site}" title="Remove">✕</button>`;
-    chip.querySelector('button').addEventListener('click', () => {
-      fields[site].value = '';
-      renderChips();
-    });
-    container.appendChild(chip);
-  }
-}
-
-renderChips();
-
-// Autocomplete
-let debounceTimer;
-const input   = document.getElementById('buyback-query');
-const dropdown = document.getElementById('buyback-dropdown');
-let activeIdx = -1;
-let allOptions = [];
-
-input.addEventListener('input', () => {
-  clearTimeout(debounceTimer);
-  const q = input.value.trim();
-  if (q.length < 3) { dropdown.classList.add('hidden'); return; }
-  debounceTimer = setTimeout(() => doSearch(q), 350);
-});
-
-input.addEventListener('keydown', (e) => {
-  const opts = dropdown.querySelectorAll('.buyback-option');
-  if (e.key === 'ArrowDown') {
-    e.preventDefault();
-    activeIdx = Math.min(activeIdx + 1, opts.length - 1);
-    opts.forEach((o, i) => o.classList.toggle('active', i === activeIdx));
-  } else if (e.key === 'ArrowUp') {
-    e.preventDefault();
-    activeIdx = Math.max(activeIdx - 1, 0);
-    opts.forEach((o, i) => o.classList.toggle('active', i === activeIdx));
-  } else if (e.key === 'Enter' && activeIdx >= 0) {
-    e.preventDefault();
-    opts[activeIdx].click();
-  } else if (e.key === 'Escape') {
-    dropdown.classList.add('hidden');
-  }
-});
-
-document.addEventListener('click', (e) => {
-  if (!e.target.closest('.buyback-search')) dropdown.classList.add('hidden');
-});
-
-async function doSearch(q) {
-  dropdown.innerHTML = '<div class="search-loading">Suche läuft…</div>';
-  dropdown.classList.remove('hidden');
-  activeIdx = -1;
-
-  try {
-    const res = await fetch(`/api/buyback/search?q=${encodeURIComponent(q)}`);
-    const data = await res.json();
-
-    allOptions = [];
-    ['wirkaufens', 'zoxs', 'clevertronic'].forEach(site => {
-      (data[site] || []).forEach(item => allOptions.push({site, ...item}));
-    });
-
-    if (!allOptions.length) {
-      dropdown.innerHTML = '<div class="no-results">Keine Ergebnisse</div>';
-      return;
+    const u = new URL(url);
+    for (const param of ['_nkw', 'query', 'search_text', 'q']) {
+      if (u.searchParams.has(param)) return decodeURIComponent(u.searchParams.get(param).replace(/\+/g, ' '));
     }
+    const slug = u.pathname.trim('/').split('/').pop() || '';
+    return slug.replace(/-/g, ' ');
+  } catch { return ''; }
+}
 
-    dropdown.innerHTML = '';
-    allOptions.forEach((opt, i) => {
-      const div = document.createElement('div');
-      div.className = 'buyback-option';
-      div.innerHTML = `<span class="site-tag ${opt.site}">${SITE_LABELS[opt.site]}</span>
-                       <span class="opt-name">${opt.name}</span>`;
-      div.addEventListener('click', () => {
-        fields[opt.site].value = opt.url;
-        renderChips();
-        dropdown.classList.add('hidden');
-        input.value = '';
-      });
-      dropdown.appendChild(div);
-    });
-  } catch {
-    dropdown.innerHTML = '<div class="no-results">Fehler beim Laden</div>';
-  }
+const ebayInput = document.querySelector('input[name="ebay_url"]');
+const kwDisplay = document.getElementById('kw-display');
+
+function updateKeywordPreview() {
+  const kw = extractKeyword(ebayInput.value.trim());
+  kwDisplay.textContent = kw || '—';
+}
+
+if (ebayInput) {
+  ebayInput.addEventListener('input', updateKeywordPreview);
+  updateKeywordPreview();
 }
 </script>
 </body>

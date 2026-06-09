@@ -25,6 +25,7 @@ _DEFAULTS: dict[str, str] = {
     "browser_fetch":          "false",
     "shipping_cost_eur":      "5.00",
     "ebay_fee_rate":          "0.1235",
+    "deepseek_api_key":       "",
 }
 
 
@@ -38,6 +39,7 @@ class AppSettings:
     browser_fetch: bool = False
     shipping_cost_eur: float = 5.00
     ebay_fee_rate: float = 0.1235
+    deepseek_api_key: str = ""
 
 
 class SettingsStore:
@@ -71,6 +73,7 @@ class SettingsStore:
             browser_fetch=_bool(get("browser_fetch")),
             shipping_cost_eur=float(get("shipping_cost_eur") or 5.0),
             ebay_fee_rate=float(get("ebay_fee_rate") or 0.1235),
+            deepseek_api_key=get("deepseek_api_key"),
         )
 
     def save(self, settings: AppSettings) -> None:
@@ -83,6 +86,7 @@ class SettingsStore:
             ("browser_fetch",          _str_bool(settings.browser_fetch)),
             ("shipping_cost_eur",      str(settings.shipping_cost_eur)),
             ("ebay_fee_rate",          str(settings.ebay_fee_rate)),
+            ("deepseek_api_key",       settings.deepseek_api_key),
         ]
         with self._conn:
             self._conn.executemany(

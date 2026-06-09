@@ -64,6 +64,20 @@
       <span class="hint">As a decimal, e.g. 0.1235 = 12.35%. Default for smartphones (DE private sellers).</span>
     </label>
 
+    <h2 class="wide section-heading">Arbitrage &amp; KI</h2>
+
+    <label class="wide">
+      DeepSeek API Key
+      <input type="password" name="deepseek_api_key"
+             value="{{ s.deepseek_api_key }}"
+             placeholder="sk-...">
+      <span class="hint">
+        Optional. Wenn gesetzt, wird DeepSeek verwendet um aus Listing-Titeln automatisch
+        Speichergröße (GB), Modell und Farbe zu extrahieren — für präzisere Buyback-Preiszuordnung.
+        Key: <a href="https://platform.deepseek.com" target="_blank" style="color:var(--accent)">platform.deepseek.com</a>
+      </span>
+    </label>
+
     <h2 class="wide section-heading">Scanning</h2>
 
     <label>
