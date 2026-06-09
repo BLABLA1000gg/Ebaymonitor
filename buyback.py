@@ -10,18 +10,18 @@ zoxs          – buyback site (Ankauf); shows what ZOXS pays you per condition.
                 URL: https://www.zoxs.de/verkaufen/MODEL-ankauf/ASIN.html
                 Find the URL at zoxs.de → Handys → Apple → your model.
 
-wirkaufens    – buyback site; prices are 0 € when their stock is full (common
-                for popular models). Will be implemented when their API is stable.
+wirkaufens    – buyback site (Ankauf); shows what WirKaufens pays you per condition.
+                URL: https://wirkaufens.de/produkte/PRODUCT-SLUG
+                e.g. https://wirkaufens.de/produkte/apple-iphone-12-128-gb
 
 Usage
 -----
     from buyback import BuybackScraper
     with BuybackScraper() as scraper:
-        ct = scraper.clevertronic("https://www.clevertronic.de/kaufen/handy-kaufen/apple/iphone-12")
-        # {"Sehr gut": Decimal("294.99"), "Gut": Decimal("259.99"), ...}
-
+        ct   = scraper.clevertronic("https://www.clevertronic.de/kaufen/handy-kaufen/apple/iphone-12")
         zoxs = scraper.zoxs("https://www.zoxs.de/verkaufen/iphone-12-ankauf/B08L5TNKZC.html")
-        # {"Wie neu": Decimal("146.72"), "Sehr gut": Decimal("105.04"), ...}
+        wkfs = scraper.wirkaufens("https://wirkaufens.de/produkte/apple-iphone-12-128-gb")
+        # Each returns {condition_name: Decimal(price)}
 """
 from __future__ import annotations
 
@@ -43,6 +43,15 @@ ZOXS_CONDITIONS = {
     "3": "Sehr gut",
     "4": "Gut",
     "65": "Stark gebraucht",
+}
+
+# WirKaufens condition IDs (best→worst)
+WKFS_CONDITIONS = {
+    5: "Neu",
+    4: "Wie Neu",
+    3: "Gut",
+    2: "In Ordnung",
+    1: "Schlecht",
 }
 
 
@@ -236,6 +245,122 @@ class BuybackScraper:
                     raw = api_result.get("priceRaw", 0)
                     if raw and raw > 0:
                         result[name] = Decimal(str(raw))
+
+        finally:
+            ctx.close()
+        return result
+
+
+    # ------------------------------------------------------------------ #
+    # WirKaufens – Ankaufpreise (what WirKaufens pays you, per condition) #
+    # ------------------------------------------------------------------ #
+
+    def wirkaufens(self, url: str) -> dict[str, Decimal]:
+        """
+        Scrape WirKaufens Ankaufpreise for all conditions of a product.
+
+        Strategy
+        --------
+        1. Open the product page to get session cookies (cookie consent required).
+        2. Accept the cookie consent banner via JS.
+        3. Trigger one API call to ``/trade-in/devices`` by JS-clicking Ja + a
+           condition — this reveals the ``device`` ID and ``questions`` payload.
+        4. Use the browser's own ``fetch()`` to query all conditions at once.
+
+        Conditions: Neu, Wie Neu, Gut, In Ordnung, Schlecht
+        (best-case answers: all questions answered Ja/1)
+
+        Example URL:
+            https://wirkaufens.de/produkte/apple-iphone-12-128-gb
+        """
+        ctx = self._browser.new_context(
+            locale="de-DE",
+            viewport={"width": 1366, "height": 768},
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+        )
+        page = ctx.new_page()
+        result: dict[str, Decimal] = {}
+
+        # Intercept /trade-in/devices to capture device_id + questions
+        captured: dict[str, Any] = {}
+
+        def on_request(req: Any) -> None:
+            if "trade-in/devices" in req.url and req.post_data and not captured:
+                try:
+                    captured.update(json.loads(req.post_data))
+                except Exception:
+                    pass
+
+        page.on("request", on_request)
+
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2000)
+
+            # Accept cookie consent
+            page.evaluate("document.getElementById('cookiescript_accept')?.click()")
+            page.wait_for_timeout(800)
+
+            # Trigger one /trade-in/devices call to capture device_id + questions
+            page.evaluate("""
+                async () => {
+                    const click = el => el?.dispatchEvent(
+                        new MouseEvent('click', {bubbles: true, cancelable: true})
+                    );
+                    // Answer Ja for all visible Ja/Nein questions
+                    document.querySelectorAll('button[id^="answer-1"]').forEach(click);
+                    await new Promise(r => setTimeout(r, 400));
+                    // Select any condition on the slider
+                    click(document.querySelector('[data-condition="4"]'));
+                }
+            """)
+            page.wait_for_timeout(2000)
+
+            device_id = captured.get("device")
+            questions = captured.get("questions", {"2": 1, "4": 1})
+
+            if not device_id:
+                return result
+
+            # Fetch all conditions via the browser's own fetch() (carries session cookies)
+            conditions_js = json.dumps({str(k): v for k, v in WKFS_CONDITIONS.items()})
+            api_results = page.evaluate(
+                """
+                async ([deviceId, questions, conditions]) => {
+                    const prices = {};
+                    for (const [condId, condName] of Object.entries(conditions)) {
+                        try {
+                            const r = await fetch('/trade-in/devices', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Accept': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    device: deviceId,
+                                    condition: parseInt(condId),
+                                    questions: questions,
+                                    application: 'shop',
+                                    landing_page: 'WKFS_NUXT_DE'
+                                }),
+                                credentials: 'include'
+                            });
+                            const data = await r.json();
+                            if (data.price > 0) prices[condName] = data.price;
+                        } catch (e) { /* skip */ }
+                    }
+                    return prices;
+                }
+                """,
+                [device_id, questions, json.loads(conditions_js)],
+            )
+
+            for name, price_raw in (api_results or {}).items():
+                if price_raw:
+                    result[name] = Decimal(str(price_raw))
 
         finally:
             ctx.close()

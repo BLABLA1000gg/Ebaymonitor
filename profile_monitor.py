@@ -81,7 +81,8 @@ def scan_profiles(
         # Run outside the main BrowserFetcher context (browser already closed).
         ct_prices: dict = {}
         zoxs_prices: dict = {}
-        needs_buyback = profile.clevertronic_url or profile.zoxs_url
+        wirkaufens_prices: dict = {}
+        needs_buyback = profile.clevertronic_url or profile.zoxs_url or profile.wirkaufens_url
         if needs_buyback:
             try:
                 with BuybackScraper() as bs:
@@ -91,13 +92,16 @@ def scan_profiles(
                     if profile.zoxs_url:
                         zoxs_prices = {k: str(v) for k, v in bs.zoxs(profile.zoxs_url).items()}
                         LOGGER.info("%s: ZOXS Ankaufpreise: %s", profile.name, zoxs_prices)
+                    if profile.wirkaufens_url:
+                        wirkaufens_prices = {k: str(v) for k, v in bs.wirkaufens(profile.wirkaufens_url).items()}
+                        LOGGER.info("%s: WirKaufens Ankaufpreise: %s", profile.name, wirkaufens_prices)
             except Exception as err:
                 LOGGER.warning("%s: Buyback fetch failed: %s", profile.name, err)
 
         successful_profiles += 1
         metrics = market_metrics(sold, len(active), profile.sold_window_days)
         store.record_profile_analysis(profile, sold_url, active, metrics,
-                                      ct_prices or None, zoxs_prices or None)
+                                      ct_prices or None, zoxs_prices or None, wirkaufens_prices or None)
         for item in active:
             all_active[item.link] = item
         LOGGER.info(

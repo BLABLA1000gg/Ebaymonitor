@@ -28,6 +28,9 @@ class SearchProfile:
     # Optional ZOXS product URL for Ankaufpreise (what ZOXS pays you) per condition.
     # e.g. https://www.zoxs.de/verkaufen/iphone-12-ankauf/B08L5TNKZC.html
     zoxs_url: str | None = None
+    # Optional WirKaufens product URL for Ankaufpreise.
+    # e.g. https://wirkaufens.de/produkte/apple-iphone-12-128-gb
+    wirkaufens_url: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "proxy_url", validate_proxy_url(self.proxy_url))
