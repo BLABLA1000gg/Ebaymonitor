@@ -19,6 +19,9 @@ class SearchProfile:
     sold_window_days: int = 90
     enabled: bool = True
     proxy_url: str | None = None
+    # Optional eBay search URL used to pull sold-price data for arbitrage profit
+    # estimation when this profile monitors a non-eBay marketplace (KA / Vinted).
+    ebay_reference_url: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "proxy_url", validate_proxy_url(self.proxy_url))

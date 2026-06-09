@@ -48,6 +48,22 @@
       Send a sold-price statistics summary after each eBay scan
     </label>
 
+    <h2 class="wide section-heading">Flip profit calculator</h2>
+
+    <label>
+      Shipping cost (€)
+      <input type="number" step="0.01" min="0" name="shipping_cost_eur"
+             value="{{ '%.2f'|format(s.shipping_cost_eur) }}">
+      <span class="hint">Outbound shipping deducted from profit estimate. Default 5.00 € (DHL Päckchen M).</span>
+    </label>
+
+    <label>
+      eBay final-value fee rate
+      <input type="number" step="0.0001" min="0" max="1" name="ebay_fee_rate"
+             value="{{ '%.4f'|format(s.ebay_fee_rate) }}">
+      <span class="hint">As a decimal, e.g. 0.1235 = 12.35%. Default for smartphones (DE private sellers).</span>
+    </label>
+
     <h2 class="wide section-heading">Scanning</h2>
 
     <label>

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from analytics import MarketMetrics, deal_score
+from analytics import MarketMetrics, deal_score, flip_profit
 from models import EventType, Listing, ListingEvent
 from profiles import SearchProfile
 
@@ -19,6 +19,10 @@ CREATE INDEX IF NOT EXISTS idx_price_history_link_time ON price_history(link,obs
 CREATE INDEX IF NOT EXISTS idx_market_snapshots_profile_time ON market_snapshots(profile_id,observed_at);
 """
 
+_MIGRATIONS = [
+    "ALTER TABLE search_profiles ADD COLUMN ebay_reference_url TEXT",
+]
+
 
 class MonitorStore:
     def __init__(self, path: str | Path):
@@ -26,6 +30,15 @@ class MonitorStore:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self):
+        for stmt in _MIGRATIONS:
+            try:
+                with self.connection:
+                    self.connection.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     def close(self):
         self.connection.close()
@@ -40,16 +53,16 @@ class MonitorStore:
         now = datetime.now(timezone.utc).isoformat()
         base = (profile.name, profile.ebay_url, profile.include_keywords, profile.exclude_keywords,
                 _decimal(profile.min_price), _decimal(profile.max_price), profile.currency,
-                profile.sold_window_days, int(profile.enabled))
+                profile.sold_window_days, int(profile.enabled), profile.ebay_reference_url or None)
         with self.connection:
             if profile.id is None:
                 cursor = self.connection.execute(
-                    "INSERT INTO search_profiles(name,ebay_url,include_keywords,exclude_keywords,min_price,max_price,currency,sold_window_days,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO search_profiles(name,ebay_url,include_keywords,exclude_keywords,min_price,max_price,currency,sold_window_days,enabled,ebay_reference_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     base + (now, now),
                 )
                 return int(cursor.lastrowid)
             self.connection.execute(
-                "UPDATE search_profiles SET name=?,ebay_url=?,include_keywords=?,exclude_keywords=?,min_price=?,max_price=?,currency=?,sold_window_days=?,enabled=?,updated_at=? WHERE id=?",
+                "UPDATE search_profiles SET name=?,ebay_url=?,include_keywords=?,exclude_keywords=?,min_price=?,max_price=?,currency=?,sold_window_days=?,enabled=?,ebay_reference_url=?,updated_at=? WHERE id=?",
                 base + (now, profile.id),
             )
             return profile.id
@@ -70,10 +83,11 @@ class MonitorStore:
 
     @staticmethod
     def _profile(row):
+        ref = row["ebay_reference_url"] if "ebay_reference_url" in row.keys() else None
         return SearchProfile(row["id"], row["name"], row["ebay_url"], row["include_keywords"],
                              row["exclude_keywords"], Decimal(row["min_price"]) if row["min_price"] else None,
                              Decimal(row["max_price"]) if row["max_price"] else None, row["currency"],
-                             row["sold_window_days"], bool(row["enabled"]))
+                             row["sold_window_days"], bool(row["enabled"]), ebay_reference_url=ref)
 
     def record_scan(self, listings: list[Listing]):
         now = datetime.now(timezone.utc).isoformat()
@@ -116,15 +130,43 @@ class MonitorStore:
                     (profile.id,item.link,_decimal(deal_score(item.price, metrics.median)),now),
                 )
 
-    def dashboard(self, profile_id=None):
+    def dashboard(self, profile_id=None, shipping_cost=Decimal("5.00"), fee_rate=Decimal("0.1235")):
         profiles = self.profiles()
         selected = profile_id or (profiles[0].id if profiles else None)
         snapshot = trend = deals = None
+        ref_median: Decimal | None = None
         if selected is not None:
             snapshot = self.connection.execute("SELECT * FROM market_snapshots WHERE profile_id=? ORDER BY observed_at DESC LIMIT 1", (selected,)).fetchone()
             trend = self.connection.execute("SELECT * FROM market_snapshots WHERE profile_id=? ORDER BY observed_at ASC LIMIT 180", (selected,)).fetchall()
-            deals = self.connection.execute("SELECT l.*,pl.deal_score FROM profile_listings pl JOIN listings l ON l.link=pl.link WHERE pl.profile_id=? AND l.active=1 ORDER BY CAST(pl.deal_score AS REAL) DESC LIMIT 50", (selected,)).fetchall()
-        return {"profiles":profiles,"selected_profile_id":selected,"snapshot":dict(snapshot) if snapshot else None,"trend":[dict(x) for x in trend or []],"deals":[dict(x) for x in deals or []]}
+            raw_deals = self.connection.execute("SELECT l.*,pl.deal_score FROM profile_listings pl JOIN listings l ON l.link=pl.link WHERE pl.profile_id=? AND l.active=1 ORDER BY CAST(pl.deal_score AS REAL) DESC LIMIT 50", (selected,)).fetchall()
+
+            # Arbitrage: if the profile has an ebay_reference_url, look up the
+            # latest median sold price for that eBay search to compute flip profit.
+            selected_profile = next((p for p in profiles if p.id == selected), None)
+            if selected_profile and selected_profile.ebay_reference_url:
+                ref_snap = self.connection.execute(
+                    "SELECT median_sold_price FROM market_snapshots WHERE sold_url LIKE ? ORDER BY observed_at DESC LIMIT 1",
+                    (selected_profile.ebay_reference_url.split("?")[0] + "%",),
+                ).fetchone()
+                if ref_snap and ref_snap["median_sold_price"]:
+                    ref_median = Decimal(ref_snap["median_sold_price"])
+
+            deals = []
+            for row in raw_deals:
+                d = dict(row)
+                price = Decimal(row["current_price"]) if row["current_price"] else None
+                if price and ref_median:
+                    profit, roi = flip_profit(price, ref_median, shipping_cost, fee_rate)
+                    d["flip_profit"] = float(profit)
+                    d["flip_roi"] = float(roi) if roi is not None else None
+                    d["ref_median"] = float(ref_median)
+                else:
+                    d["flip_profit"] = None
+                    d["flip_roi"] = None
+                    d["ref_median"] = None
+                deals.append(d)
+
+        return {"profiles":profiles,"selected_profile_id":selected,"snapshot":dict(snapshot) if snapshot else None,"trend":[dict(x) for x in trend or []],"deals":deals or []}
 
     def price_history(self, link):
         return [dict(row) for row in self.connection.execute("SELECT price,observed_at FROM price_history WHERE link=? ORDER BY observed_at", (link,))]

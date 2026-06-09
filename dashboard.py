@@ -32,8 +32,13 @@ def create_app(database_path: str | Path | None = None) -> Flask:
 
     @app.get("/")
     def index():
-        with store() as database:
-            data = database.dashboard(request.args.get("profile", type=int))
+        with store() as database, settings_store() as ss:
+            s = ss.load()
+            data = database.dashboard(
+                request.args.get("profile", type=int),
+                shipping_cost=Decimal(str(s.shipping_cost_eur)),
+                fee_rate=Decimal(str(s.ebay_fee_rate)),
+            )
         return render_template(
             "dashboard.html",
             monitor_status=app.extensions["monitor_controller"].status(),
@@ -71,6 +76,8 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     notify_price_increases=request.form.get("notify_price_increases") == "on",
                     notify_statistics=request.form.get("notify_statistics") == "on",
                     browser_fetch=request.form.get("browser_fetch") == "on",
+                    shipping_cost_eur=max(0.0, float(request.form.get("shipping_cost_eur") or 5.0)),
+                    ebay_fee_rate=max(0.0, min(1.0, float(request.form.get("ebay_fee_rate") or 0.1235))),
                 )
                 ss.save(new_settings)
                 # Apply new interval to running controller
@@ -85,6 +92,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         with store() as database, ProfileProxyStore(app.config["DATABASE_PATH"]) as proxies:
             current = database.profile(profile_id) if profile_id else None
             if request.method == "POST":
+                ref_url = request.form.get("ebay_reference_url", "").strip() or None
                 profile = SearchProfile(
                     id=profile_id, name=request.form["name"].strip(),
                     ebay_url=request.form["ebay_url"].strip(),
@@ -95,6 +103,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     currency=request.form.get("currency") or None,
                     sold_window_days=max(1, int(request.form.get("sold_window_days", "90"))),
                     enabled=request.form.get("enabled") == "on",
+                    ebay_reference_url=ref_url,
                 )
                 saved_id = database.save_profile(profile)
                 new_proxy = request.form.get("proxy_url", "").strip()

@@ -23,6 +23,8 @@ _DEFAULTS: dict[str, str] = {
     "notify_price_increases": "false",
     "notify_statistics":      "false",
     "browser_fetch":          "false",
+    "shipping_cost_eur":      "5.00",
+    "ebay_fee_rate":          "0.1235",
 }
 
 
@@ -34,6 +36,8 @@ class AppSettings:
     notify_price_increases: bool = False
     notify_statistics: bool = False
     browser_fetch: bool = False
+    shipping_cost_eur: float = 5.00
+    ebay_fee_rate: float = 0.1235
 
 
 class SettingsStore:
@@ -65,6 +69,8 @@ class SettingsStore:
             notify_price_increases=_bool(get("notify_price_increases")),
             notify_statistics=_bool(get("notify_statistics")),
             browser_fetch=_bool(get("browser_fetch")),
+            shipping_cost_eur=float(get("shipping_cost_eur") or 5.0),
+            ebay_fee_rate=float(get("ebay_fee_rate") or 0.1235),
         )
 
     def save(self, settings: AppSettings) -> None:
@@ -75,6 +81,8 @@ class SettingsStore:
             ("notify_price_increases", _str_bool(settings.notify_price_increases)),
             ("notify_statistics",      _str_bool(settings.notify_statistics)),
             ("browser_fetch",          _str_bool(settings.browser_fetch)),
+            ("shipping_cost_eur",      str(settings.shipping_cost_eur)),
+            ("ebay_fee_rate",          str(settings.ebay_fee_rate)),
         ]
         with self._conn:
             self._conn.executemany(

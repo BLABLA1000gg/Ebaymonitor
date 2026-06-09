@@ -86,3 +86,29 @@ def deal_score(active_price: Decimal | None, sold_median: Decimal | None) -> Dec
         return None
     discount = (sold_median - active_price) / sold_median
     return max(Decimal("0"), min(Decimal("100"), Decimal("50") + discount * Decimal("100")))
+
+
+# eBay Germany final-value fee for private sellers (Smartphones category).
+# 12.35% of total sale amount + 0.35 € fixed fee per transaction.
+EBAY_FEE_RATE_DEFAULT = Decimal("0.1235")
+EBAY_FEE_FIXED_DEFAULT = Decimal("0.35")
+
+
+def flip_profit(
+    buy_price: Decimal,
+    ebay_sold_median: Decimal,
+    shipping_cost: Decimal = Decimal("5.00"),
+    fee_rate: Decimal = EBAY_FEE_RATE_DEFAULT,
+    fee_fixed: Decimal = EBAY_FEE_FIXED_DEFAULT,
+) -> tuple[Decimal, Decimal | None]:
+    """Return (net_profit, roi_pct) for buying at buy_price and selling at ebay_sold_median.
+
+    Deducts eBay final-value fee, fixed transaction fee and outbound shipping.
+    roi_pct is profit as a percentage of the purchase price, or None if buy_price is zero.
+    """
+    if ebay_sold_median <= 0:
+        return Decimal("0"), None
+    ebay_fees = ebay_sold_median * fee_rate + fee_fixed
+    net = ebay_sold_median - ebay_fees - buy_price - shipping_cost
+    roi = (net / buy_price * 100) if buy_price > 0 else None
+    return net, roi
