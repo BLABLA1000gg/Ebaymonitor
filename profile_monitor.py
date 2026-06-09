@@ -137,7 +137,7 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
     5. Pick the best matching product and scrape prices
     """
     from buyback_search import search_zoxs, search_wirkaufens, search_clevertronic
-    from deepseek_extract import extract_specs, build_search_query
+    from deepseek_extract import extract_specs_batch, build_search_query
 
     base_keyword = profile.ebay_search_keyword or profile.include_keywords
     if not base_keyword:
@@ -146,11 +146,14 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
 
     api_key = settings.deepseek_api_key if settings else ""
 
-    # Extract specs from active listings to find the dominant storage variant
+    # Extract specs from active listings in one batch call (max 30 listings)
+    # Heuristic runs first; DeepSeek only called for titles without a GB match
+    sample_titles = [item.title for item in active[:30]]
+    all_specs = extract_specs_batch(sample_titles, api_key=api_key)
+
     gb_votes: dict[int, int] = {}
-    for item in active[:20]:  # limit to first 20 to avoid slow API calls
-        specs = extract_specs(item.title, api_key=api_key)
-        if specs.get("storage_gb"):
+    for specs in all_specs:
+        if specs and specs.get("storage_gb"):
             gb = specs["storage_gb"]
             gb_votes[gb] = gb_votes.get(gb, 0) + 1
 
