@@ -60,15 +60,29 @@ class SearchProfile:
     @property
     def ebay_search_keyword(self) -> str:
         """Extract the search keyword from the eBay (or KA/Vinted) search URL."""
+        # Check all URLs (primary + extra) and return first meaningful keyword found
+        for url in [self.ebay_url] + (self.extra_urls or []):
+            kw = self._keyword_from_url(url)
+            if kw and kw not in ("k0", "catalog", "sch"):
+                return kw
+        return self.include_keywords
+
+    @staticmethod
+    def _keyword_from_url(url: str) -> str:
         try:
-            parsed = urllib.parse.urlparse(self.ebay_url)
+            parsed = urllib.parse.urlparse(url)
             qs = urllib.parse.parse_qs(parsed.query)
-            # eBay: _nkw, Kleinanzeigen: query, Vinted: search_text
-            for param in ("_nkw", "query", "search_text", "q"):
+            # eBay: _nkw, Vinted: search_text, generic: q/query
+            for param in ("_nkw", "search_text", "query", "q"):
                 if param in qs:
                     return urllib.parse.unquote_plus(qs[param][0])
-            # Fallback: slug from path
-            slug = parsed.path.strip("/").split("/")[-1]
-            return slug.replace("-", " ").replace("+", " ")
+            # Kleinanzeigen: /s-iphone-12/k0  → take segment before /k0
+            path_parts = [p for p in parsed.path.strip("/").split("/") if p and p != "k0"]
+            for part in reversed(path_parts):
+                if part.startswith("s-"):
+                    return part[2:].replace("-", " ")
+            # Generic slug fallback
+            slug = path_parts[-1] if path_parts else ""
+            return slug.replace("-", " ")
         except Exception:
-            return self.include_keywords
+            return ""
