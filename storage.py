@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import json
+
 from analytics import MarketMetrics, deal_score, flip_profit
 from models import EventType, Listing, ListingEvent
 from profiles import SearchProfile
@@ -21,6 +23,8 @@ CREATE INDEX IF NOT EXISTS idx_market_snapshots_profile_time ON market_snapshots
 
 _MIGRATIONS = [
     "ALTER TABLE search_profiles ADD COLUMN ebay_reference_url TEXT",
+    "ALTER TABLE search_profiles ADD COLUMN clevertronic_url TEXT",
+    "ALTER TABLE profile_listings ADD COLUMN clevertronic_prices TEXT",
 ]
 
 
@@ -53,16 +57,17 @@ class MonitorStore:
         now = datetime.now(timezone.utc).isoformat()
         base = (profile.name, profile.ebay_url, profile.include_keywords, profile.exclude_keywords,
                 _decimal(profile.min_price), _decimal(profile.max_price), profile.currency,
-                profile.sold_window_days, int(profile.enabled), profile.ebay_reference_url or None)
+                profile.sold_window_days, int(profile.enabled),
+                profile.ebay_reference_url or None, profile.clevertronic_url or None)
         with self.connection:
             if profile.id is None:
                 cursor = self.connection.execute(
-                    "INSERT INTO search_profiles(name,ebay_url,include_keywords,exclude_keywords,min_price,max_price,currency,sold_window_days,enabled,ebay_reference_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO search_profiles(name,ebay_url,include_keywords,exclude_keywords,min_price,max_price,currency,sold_window_days,enabled,ebay_reference_url,clevertronic_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     base + (now, now),
                 )
                 return int(cursor.lastrowid)
             self.connection.execute(
-                "UPDATE search_profiles SET name=?,ebay_url=?,include_keywords=?,exclude_keywords=?,min_price=?,max_price=?,currency=?,sold_window_days=?,enabled=?,ebay_reference_url=?,updated_at=? WHERE id=?",
+                "UPDATE search_profiles SET name=?,ebay_url=?,include_keywords=?,exclude_keywords=?,min_price=?,max_price=?,currency=?,sold_window_days=?,enabled=?,ebay_reference_url=?,clevertronic_url=?,updated_at=? WHERE id=?",
                 base + (now, profile.id),
             )
             return profile.id
@@ -83,11 +88,14 @@ class MonitorStore:
 
     @staticmethod
     def _profile(row):
-        ref = row["ebay_reference_url"] if "ebay_reference_url" in row.keys() else None
+        keys = row.keys()
+        ref = row["ebay_reference_url"] if "ebay_reference_url" in keys else None
+        ct = row["clevertronic_url"] if "clevertronic_url" in keys else None
         return SearchProfile(row["id"], row["name"], row["ebay_url"], row["include_keywords"],
                              row["exclude_keywords"], Decimal(row["min_price"]) if row["min_price"] else None,
                              Decimal(row["max_price"]) if row["max_price"] else None, row["currency"],
-                             row["sold_window_days"], bool(row["enabled"]), ebay_reference_url=ref)
+                             row["sold_window_days"], bool(row["enabled"]),
+                             ebay_reference_url=ref, clevertronic_url=ct)
 
     def record_scan(self, listings: list[Listing]):
         now = datetime.now(timezone.utc).isoformat()
@@ -115,10 +123,18 @@ class MonitorStore:
                 self.connection.execute("UPDATE listings SET active=0")
         return events
 
-    def record_profile_analysis(self, profile: SearchProfile, sold_url: str, active: list[Listing], metrics: MarketMetrics):
+    def record_profile_analysis(
+        self,
+        profile: SearchProfile,
+        sold_url: str,
+        active: list[Listing],
+        metrics: MarketMetrics,
+        clevertronic_prices: dict | None = None,
+    ):
         if profile.id is None:
             raise ValueError("Profile must be saved before analysis")
         now = datetime.now(timezone.utc).isoformat()
+        ct_json = json.dumps(clevertronic_prices) if clevertronic_prices else None
         with self.connection:
             self.connection.execute(
                 "INSERT INTO market_snapshots(profile_id,sold_url,raw_sold_count,accepted_sold_count,average_sold_price,median_sold_price,minimum_sold_price,maximum_sold_price,sold_per_month,active_count,sell_through_rate,estimated_days_to_sell,demand,observed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -126,8 +142,8 @@ class MonitorStore:
             )
             for item in active:
                 self.connection.execute(
-                    "INSERT INTO profile_listings(profile_id,link,deal_score,last_seen) VALUES(?,?,?,?) ON CONFLICT(profile_id,link) DO UPDATE SET deal_score=excluded.deal_score,last_seen=excluded.last_seen",
-                    (profile.id,item.link,_decimal(deal_score(item.price, metrics.median)),now),
+                    "INSERT INTO profile_listings(profile_id,link,deal_score,clevertronic_prices,last_seen) VALUES(?,?,?,?,?) ON CONFLICT(profile_id,link) DO UPDATE SET deal_score=excluded.deal_score,clevertronic_prices=excluded.clevertronic_prices,last_seen=excluded.last_seen",
+                    (profile.id,item.link,_decimal(deal_score(item.price, metrics.median)),ct_json,now),
                 )
 
     def dashboard(self, profile_id=None, shipping_cost=Decimal("5.00"), fee_rate=Decimal("0.1235")):
@@ -164,6 +180,9 @@ class MonitorStore:
                     d["flip_profit"] = None
                     d["flip_roi"] = None
                     d["ref_median"] = None
+                # Clevertronic condition prices (stored as JSON string)
+                ct_raw = row["clevertronic_prices"] if "clevertronic_prices" in row.keys() else None
+                d["clevertronic_prices"] = json.loads(ct_raw) if ct_raw else None
                 deals.append(d)
 
         return {"profiles":profiles,"selected_profile_id":selected,"snapshot":dict(snapshot) if snapshot else None,"trend":[dict(x) for x in trend or []],"deals":deals or []}

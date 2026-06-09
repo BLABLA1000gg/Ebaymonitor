@@ -93,6 +93,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             current = database.profile(profile_id) if profile_id else None
             if request.method == "POST":
                 ref_url = request.form.get("ebay_reference_url", "").strip() or None
+                ct_url = request.form.get("clevertronic_url", "").strip() or None
                 profile = SearchProfile(
                     id=profile_id, name=request.form["name"].strip(),
                     ebay_url=request.form["ebay_url"].strip(),
@@ -104,6 +105,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     sold_window_days=max(1, int(request.form.get("sold_window_days", "90"))),
                     enabled=request.form.get("enabled") == "on",
                     ebay_reference_url=ref_url,
+                    clevertronic_url=ct_url,
                 )
                 saved_id = database.save_profile(profile)
                 new_proxy = request.form.get("proxy_url", "").strip()

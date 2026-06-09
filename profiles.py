@@ -22,6 +22,9 @@ class SearchProfile:
     # Optional eBay search URL used to pull sold-price data for arbitrage profit
     # estimation when this profile monitors a non-eBay marketplace (KA / Vinted).
     ebay_reference_url: str | None = None
+    # Optional Clevertronic category URL for condition-based refurbished sell prices.
+    # e.g. https://www.clevertronic.de/kaufen/handy-kaufen/apple/iphone-12
+    clevertronic_url: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "proxy_url", validate_proxy_url(self.proxy_url))
