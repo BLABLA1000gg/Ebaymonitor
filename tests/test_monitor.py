@@ -47,19 +47,27 @@ class SoldSearchTests(unittest.TestCase):
 class ParseListingsTests(unittest.TestCase):
     def test_parses_optional_listing_metadata(self):
         html = """
-        <li class="s-item"><a class="s-item__link" href="https://www.ebay.de/itm/123"></a>
-        <div class="s-item__title">MacBook Pro M1</div><span class="s-item__price">EUR 799,99</span>
-        <span class="SECONDARY_INFO">Gebraucht</span><span class="s-item__shipping">EUR 5 Versand</span>
-        <span class="s-item__location">Berlin</span><img class="s-item__image-img" data-src="https://example.com/image.jpg"></li>
+        <li class="s-card" data-listingid="123">
+          <a class="s-card__link" href="https://www.ebay.de/itm/123"></a>
+          <span class="su-styled-text primary default">MacBook Pro M1</span>
+          <span class="su-styled-text primary bold">EUR 799,99</span>
+          <span class="su-styled-text secondary default">Gebraucht |</span>
+          <span class="su-styled-text secondary large">EUR 5 Versand</span>
+          <img class="s-card__image" src="https://example.com/image.jpg">
+        </li>
         """
         result = parse_listings(html)
         self.assertEqual(result[0].price, Decimal("799.99"))
         self.assertEqual(result[0].condition, "Gebraucht")
 
     def test_skips_incomplete_and_placeholder_entries(self):
-        html = """<li class="s-item"><div class="s-item__title">Missing</div></li>
-        <li class="s-item"><a class="s-item__link" href="https://www.ebay.de/"></a>
-        <div class="s-item__title">Shop on eBay</div><span class="s-item__price">EUR 0.00</span></li>"""
+        # No link → skip
+        html = """<li class="s-card"><span class="su-styled-text primary default">Missing</span></li>
+        <li class="s-card" data-listingid="999">
+          <a class="s-card__link" href="https://www.ebay.de/itm/999"></a>
+          <span class="su-styled-text primary default">Shop on eBay</span>
+          <span class="su-styled-text primary bold">EUR 0,00</span>
+        </li>"""
         self.assertEqual(parse_listings(html), [])
 
     def test_parses_kleinanzeigen_listing(self):
