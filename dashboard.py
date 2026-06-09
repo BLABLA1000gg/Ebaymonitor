@@ -100,6 +100,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                 zoxs_url_val = request.form.get("zoxs_url", "").strip() or None
                 wkfs_url_val = request.form.get("wirkaufens_url", "").strip() or None
                 buyback_platforms = request.form.getlist("buyback_platforms")
+                extra_urls = [u for u in request.form.getlist("extra_urls") if u.strip()]
                 profile = SearchProfile(
                     id=profile_id, name=request.form["name"].strip(),
                     ebay_url=request.form["ebay_url"].strip(),
@@ -115,6 +116,7 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     zoxs_url=zoxs_url_val,
                     wirkaufens_url=wkfs_url_val,
                     buyback_platforms=buyback_platforms,
+                    extra_urls=extra_urls,
                 )
                 saved_id = database.save_profile(profile)
                 new_proxy = request.form.get("proxy_url", "").strip()

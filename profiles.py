@@ -37,6 +37,8 @@ class SearchProfile:
     # List of platform keys: ["zoxs", "wirkaufens", "clevertronic"]
     # When set, overrides the individual *_url fields above.
     buyback_platforms: list[str] = field(default_factory=list)
+    # Additional search URLs (Kleinanzeigen, Vinted, extra eBay) scanned alongside ebay_url
+    extra_urls: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         object.__setattr__(self, "proxy_url", validate_proxy_url(self.proxy_url))

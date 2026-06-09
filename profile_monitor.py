@@ -36,42 +36,40 @@ def scan_profiles(
     successful_profiles = 0
     for profile in profiles:
         try:
-            marketplace = marketplace_for_url(profile.ebay_url)
             proxy_url = proxy_store.get(profile.id)
-            with requests.Session() as session:
-                if proxy_url:
-                    session.proxies.update(request_proxies(proxy_url) or {})
-                # eBay requires a real (non-headless) browser to bypass Akamai bot
-                # detection. Always use BrowserFetcher for eBay profiles.
-                use_browser = marketplace is EBAY or settings.browser_fetch
-                browser_context = BrowserFetcher(proxy_url) if use_browser else None
-                if browser_context:
-                    browser_context.__enter__()
-                try:
-                    active = [
-                        item for item in fetch_listings(
-                            session,
-                            profile.ebay_url,
-                            browser_fetcher=browser_context,
-                        )
-                        if profile.listing_filter.matches(item)
-                    ]
-                    if marketplace.supports_sold_search:
-                        sold_url = sold_search_url(profile.ebay_url)
-                        sold = [
-                            item for item in fetch_listings(
-                                session,
-                                sold_url,
-                                browser_fetcher=browser_context,
-                            )
-                            if profile.listing_filter.matches(item)
-                        ]
-                    else:
-                        sold_url = profile.ebay_url
-                        sold = []
-                finally:
+            # Collect all URLs to scan: primary + extra
+            all_urls = [profile.ebay_url] + (profile.extra_urls or [])
+            active_seen: dict[str, object] = {}  # dedup by link
+            sold = []
+            sold_url = profile.ebay_url
+
+            for scan_url in all_urls:
+                marketplace = marketplace_for_url(scan_url)
+                with requests.Session() as session:
+                    if proxy_url:
+                        session.proxies.update(request_proxies(proxy_url) or {})
+                    use_browser = marketplace is EBAY or settings.browser_fetch
+                    browser_context = BrowserFetcher(proxy_url) if use_browser else None
                     if browser_context:
-                        browser_context.__exit__(None, None, None)
+                        browser_context.__enter__()
+                    try:
+                        for item in fetch_listings(session, scan_url, browser_fetcher=browser_context):
+                            if profile.listing_filter.matches(item):
+                                active_seen[item.link] = item
+                        if marketplace.supports_sold_search and scan_url == profile.ebay_url:
+                            sold_url = sold_search_url(scan_url)
+                            sold = [
+                                item for item in fetch_listings(
+                                    session, sold_url, browser_fetcher=browser_context,
+                                )
+                                if profile.listing_filter.matches(item)
+                            ]
+                    finally:
+                        if browser_context:
+                            browser_context.__exit__(None, None, None)
+
+            active = list(active_seen.values())
+            LOGGER.info("%s: fetched %d listings across %d URLs", profile.name, len(active), len(all_urls))
         except requests.RequestException as error:
             message = f"{profile.name}: {error}"
             LOGGER.warning("Profile scan skipped: %s", message)

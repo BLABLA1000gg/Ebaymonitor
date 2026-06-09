@@ -30,6 +30,7 @@ _MIGRATIONS = [
     "ALTER TABLE search_profiles ADD COLUMN wirkaufens_url TEXT",
     "ALTER TABLE profile_listings ADD COLUMN wirkaufens_prices TEXT",
     "ALTER TABLE search_profiles ADD COLUMN buyback_platforms TEXT",
+    "ALTER TABLE search_profiles ADD COLUMN extra_urls TEXT",
     "ALTER TABLE profile_listings ADD COLUMN detected_condition TEXT",
     "ALTER TABLE profile_listings ADD COLUMN worth_it INTEGER DEFAULT 0",
     "ALTER TABLE profile_listings ADD COLUMN condition_profit TEXT",
@@ -65,20 +66,21 @@ class MonitorStore:
     def save_profile(self, profile: SearchProfile) -> int:
         now = datetime.now(timezone.utc).isoformat()
         platforms_json = json.dumps(profile.buyback_platforms) if profile.buyback_platforms else None
+        extra_json = json.dumps(profile.extra_urls) if profile.extra_urls else None
         base = (profile.name, profile.ebay_url, profile.include_keywords, profile.exclude_keywords,
                 _decimal(profile.min_price), _decimal(profile.max_price), profile.currency,
                 profile.sold_window_days, int(profile.enabled),
                 profile.ebay_reference_url or None, profile.clevertronic_url or None,
-                profile.zoxs_url or None, profile.wirkaufens_url or None, platforms_json)
+                profile.zoxs_url or None, profile.wirkaufens_url or None, platforms_json, extra_json)
         with self.connection:
             if profile.id is None:
                 cursor = self.connection.execute(
-                    "INSERT INTO search_profiles(name,ebay_url,include_keywords,exclude_keywords,min_price,max_price,currency,sold_window_days,enabled,ebay_reference_url,clevertronic_url,zoxs_url,wirkaufens_url,buyback_platforms,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO search_profiles(name,ebay_url,include_keywords,exclude_keywords,min_price,max_price,currency,sold_window_days,enabled,ebay_reference_url,clevertronic_url,zoxs_url,wirkaufens_url,buyback_platforms,extra_urls,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     base + (now, now),
                 )
                 return int(cursor.lastrowid)
             self.connection.execute(
-                "UPDATE search_profiles SET name=?,ebay_url=?,include_keywords=?,exclude_keywords=?,min_price=?,max_price=?,currency=?,sold_window_days=?,enabled=?,ebay_reference_url=?,clevertronic_url=?,zoxs_url=?,wirkaufens_url=?,buyback_platforms=?,updated_at=? WHERE id=?",
+                "UPDATE search_profiles SET name=?,ebay_url=?,include_keywords=?,exclude_keywords=?,min_price=?,max_price=?,currency=?,sold_window_days=?,enabled=?,ebay_reference_url=?,clevertronic_url=?,zoxs_url=?,wirkaufens_url=?,buyback_platforms=?,extra_urls=?,updated_at=? WHERE id=?",
                 base + (now, profile.id),
             )
             return profile.id
@@ -106,12 +108,14 @@ class MonitorStore:
         wkfs = row["wirkaufens_url"] if "wirkaufens_url" in keys else None
         platforms_raw = row["buyback_platforms"] if "buyback_platforms" in keys else None
         platforms = json.loads(platforms_raw) if platforms_raw else []
+        extra_raw = row["extra_urls"] if "extra_urls" in keys else None
+        extra_urls = json.loads(extra_raw) if extra_raw else []
         return SearchProfile(row["id"], row["name"], row["ebay_url"], row["include_keywords"],
                              row["exclude_keywords"], Decimal(row["min_price"]) if row["min_price"] else None,
                              Decimal(row["max_price"]) if row["max_price"] else None, row["currency"],
                              row["sold_window_days"], bool(row["enabled"]),
                              ebay_reference_url=ref, clevertronic_url=ct, zoxs_url=zoxs, wirkaufens_url=wkfs,
-                             buyback_platforms=platforms)
+                             buyback_platforms=platforms, extra_urls=extra_urls)
 
     def record_scan(self, listings: list[Listing]):
         now = datetime.now(timezone.utc).isoformat()

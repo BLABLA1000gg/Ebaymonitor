@@ -6,6 +6,19 @@
   <title>Search profile</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <style>
+    .mp-card {
+      border: 2px solid var(--line); border-radius: 10px; padding: 12px 14px;
+      cursor: pointer; transition: border-color .15s, background .15s;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .mp-card:hover { border-color: #3a4d62; background: #151e2c; }
+    .mp-card.selected { background: #151e2c; border-color: var(--accent); }
+    .mp-card input[type="checkbox"] { display: none; }
+    .mp-card .dot {
+      width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0;
+      border: 2px solid #3a4d62; transition: border-color .15s, background .15s;
+    }
+    .mp-card.selected .dot { background: var(--accent); border-color: var(--accent); }
     .platform-grid {
       display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 8px;
     }
@@ -49,29 +62,63 @@
     <input required name="name" value="{{ profile.name if profile else '' }}">
   </label>
 
-  <!-- Keyword + Marketplace builder -->
+  <!-- Keyword + Multi-Marketplace builder -->
   <div class="wide" style="margin-bottom:0">
-    <label style="display:block;margin-bottom:6px">
-      Keywords &amp; Marktplatz
-      <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:6px">
-        <input type="text" id="kw-input" placeholder="z.B. iPhone 12 128GB"
-               autocomplete="off" style="margin:0">
-        <select id="mp-select" style="margin:0;min-width:140px">
-          <option value="ebay">eBay.de</option>
-          <option value="ka">Kleinanzeigen</option>
-          <option value="vinted">Vinted</option>
-        </select>
-      </div>
-      <span style="font-size:11px;color:var(--muted);margin-top:4px;display:block">
-        Tipp: Keywords eingeben → URL wird automatisch generiert
-      </span>
+    <label style="display:block;margin-bottom:10px">
+      Keywords &amp; Marktplätze
+      <input type="text" id="kw-input" placeholder="z.B. iPhone 12 128GB"
+             autocomplete="off" style="margin-top:8px">
     </label>
+
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
+      {% set extra_list = profile.extra_urls if profile and profile.extra_urls else [] %}
+      {% set all_urls = ([profile.ebay_url] + extra_list) if profile else [] %}
+
+      <label class="mp-card" id="card-ebay">
+        <input type="checkbox" id="cb-ebay" data-mp="ebay">
+        <span class="dot"></span>
+        <div>
+          <div style="font-weight:700;font-size:13px">eBay.de</div>
+          <div style="font-size:11px;color:var(--muted)">inkl. Verkaufsanalyse</div>
+        </div>
+      </label>
+      <label class="mp-card" id="card-ka">
+        <input type="checkbox" id="cb-ka" data-mp="ka">
+        <span class="dot"></span>
+        <div>
+          <div style="font-weight:700;font-size:13px">Kleinanzeigen</div>
+          <div style="font-size:11px;color:var(--muted)">Privat-Deals</div>
+        </div>
+      </label>
+      <label class="mp-card" id="card-vinted">
+        <input type="checkbox" id="cb-vinted" data-mp="vinted">
+        <span class="dot"></span>
+        <div>
+          <div style="font-weight:700;font-size:13px">Vinted</div>
+          <div style="font-size:11px;color:var(--muted)">Mode &amp; Secondhand</div>
+        </div>
+      </label>
+    </div>
+
+    <!-- Generated URLs preview -->
+    <div id="url-preview" style="font-size:11px;color:var(--muted);margin-bottom:8px"></div>
   </div>
 
-  <label class="wide">Such-URL (wird automatisch ausgefüllt oder manuell eingeben)
-    <input required type="url" name="ebay_url" id="ebay_url_field"
-           value="{{ profile.ebay_url if profile else '' }}"
-           placeholder="https://www.ebay.de/sch/i.html?_nkw=iphone+12+128gb">
+  <!-- Hidden: primary URL (required) and extra URLs -->
+  <input type="hidden" required name="ebay_url" id="ebay_url_field"
+         value="{{ profile.ebay_url if profile else '' }}">
+  <div id="extra-url-inputs">
+    {% for u in extra_list %}
+    <input type="hidden" name="extra_urls" value="{{ u }}">
+    {% endfor %}
+  </div>
+
+  <!-- Fallback manual URL (shown if no checkbox selected) -->
+  <label class="wide" id="manual-url-row" style="{{ 'display:none' if profile and profile.ebay_url else '' }}">
+    Such-URL manuell eingeben
+    <input type="url" id="manual-url-input"
+           placeholder="https://www.ebay.de/sch/i.html?_nkw=iphone+12"
+           style="margin-top:8px">
   </label>
 
   <label class="wide">eBay reference URL for flip profit (optional)
@@ -196,63 +243,168 @@
 </main>
 
 <script>
-// Platform card toggle
-document.querySelectorAll('.platform-card').forEach(card => {
-  card.addEventListener('click', () => {
-    const cb = card.querySelector('input[type="checkbox"]');
-    // toggling happens naturally via label, just sync class
-    setTimeout(() => {
-      card.classList.toggle('selected', cb.checked);
-    }, 0);
-  });
-});
-
-// Auto-extract keyword from eBay URL field
-function extractKeyword(url) {
-  try {
-    const u = new URL(url);
-    for (const param of ['_nkw', 'query', 'search_text', 'q']) {
-      if (u.searchParams.has(param)) return decodeURIComponent(u.searchParams.get(param).replace(/\+/g, ' '));
-    }
-    const slug = u.pathname.trim('/').split('/').pop() || '';
-    return slug.replace(/-/g, ' ');
-  } catch { return ''; }
-}
-
-const ebayUrlField = document.getElementById('ebay_url_field');
-const kwDisplay    = document.getElementById('kw-display');
-const kwInput      = document.getElementById('kw-input');
-const mpSelect     = document.getElementById('mp-select');
-
+// ------------------------------------------------------------------ //
+// Marketplace URL builder                                             //
+// ------------------------------------------------------------------ //
 const MP_URLS = {
   ebay:   kw => `https://www.ebay.de/sch/i.html?_nkw=${encodeURIComponent(kw)}&_sacat=0`,
   ka:     kw => `https://www.kleinanzeigen.de/s-${encodeURIComponent(kw).replace(/%20/g,'-')}/k0`,
   vinted: kw => `https://www.vinted.de/catalog?search_text=${encodeURIComponent(kw)}`,
 };
+const MP_LABELS = { ebay: 'eBay.de', ka: 'Kleinanzeigen', vinted: 'Vinted' };
 
-function buildUrl() {
-  const kw = kwInput.value.trim();
-  if (!kw) return;
-  const mp = mpSelect.value;
-  ebayUrlField.value = MP_URLS[mp](kw);
-  updateKeywordPreview();
+function extractKeyword(url) {
+  try {
+    const u = new URL(url);
+    for (const p of ['_nkw','query','search_text','q'])
+      if (u.searchParams.has(p)) return decodeURIComponent(u.searchParams.get(p).replace(/\+/g,' '));
+    return u.pathname.split('/').pop().replace(/-/g,' ');
+  } catch { return ''; }
 }
 
-if (kwInput)  kwInput.addEventListener('input', buildUrl);
-if (mpSelect) mpSelect.addEventListener('change', buildUrl);
-
-function updateKeywordPreview() {
-  const kw = extractKeyword(ebayUrlField.value.trim());
-  kwDisplay.textContent = kw || '—';
+function urlToMp(url) {
+  if (!url) return null;
+  if (url.includes('ebay.de'))          return 'ebay';
+  if (url.includes('kleinanzeigen.de')) return 'ka';
+  if (url.includes('vinted.de'))        return 'vinted';
+  return null;
 }
 
-if (ebayUrlField) {
-  ebayUrlField.addEventListener('input', updateKeywordPreview);
-  // Pre-fill keyword field from existing URL
-  const existing = extractKeyword(ebayUrlField.value.trim());
-  if (existing && kwInput) kwInput.value = existing;
-  updateKeywordPreview();
+// ------------------------------------------------------------------ //
+// State                                                               //
+// ------------------------------------------------------------------ //
+const primaryField  = document.getElementById('ebay_url_field');
+const extraContainer = document.getElementById('extra-url-inputs');
+const kwInput       = document.getElementById('kw-input');
+const kwDisplay     = document.getElementById('kw-display');
+const urlPreview    = document.getElementById('url-preview');
+const manualRow     = document.getElementById('manual-url-row');
+const manualInput   = document.getElementById('manual-url-input');
+
+const cards = {
+  ebay:   document.getElementById('card-ebay'),
+  ka:     document.getElementById('card-ka'),
+  vinted: document.getElementById('card-vinted'),
+};
+
+// Track selected marketplaces
+const selected = new Set();
+
+// ------------------------------------------------------------------ //
+// Pre-populate from existing profile                                  //
+// ------------------------------------------------------------------ //
+(function init() {
+  // Read existing primary URL
+  const primary = primaryField.value.trim();
+  const mp = urlToMp(primary);
+  if (mp) { selected.add(mp); }
+
+  // Read existing extra URLs
+  document.querySelectorAll('#extra-url-inputs input').forEach(inp => {
+    const m = urlToMp(inp.value);
+    if (m) selected.add(m);
+  });
+
+  // Pre-fill keyword from any URL
+  const kw = extractKeyword(primary) || '';
+  if (kw && kwInput) kwInput.value = kw;
+
+  renderCards();
+  updateHiddenFields();
+})();
+
+// ------------------------------------------------------------------ //
+// Card click handler                                                   //
+// ------------------------------------------------------------------ //
+Object.entries(cards).forEach(([mp, card]) => {
+  if (!card) return;
+  card.addEventListener('click', e => {
+    e.preventDefault();
+    if (selected.has(mp)) selected.delete(mp);
+    else selected.add(mp);
+    renderCards();
+    updateHiddenFields();
+  });
+});
+
+function renderCards() {
+  Object.entries(cards).forEach(([mp, card]) => {
+    if (card) card.classList.toggle('selected', selected.has(mp));
+  });
+
+  // URL preview
+  const kw = kwInput ? kwInput.value.trim() : '';
+  if (kw && selected.size) {
+    urlPreview.innerHTML = [...selected].map(mp =>
+      `<div style="margin:2px 0">🔗 <b>${MP_LABELS[mp]}</b>: <span style="opacity:.6;word-break:break-all">${MP_URLS[mp](kw)}</span></div>`
+    ).join('');
+  } else if (!selected.size) {
+    urlPreview.innerHTML = '<span style="color:#ff6b7a">Mindestens einen Marktplatz auswählen</span>';
+  } else {
+    urlPreview.innerHTML = '';
+  }
+
+  // Show manual input only when nothing selected
+  if (manualRow) manualRow.style.display = selected.size ? 'none' : '';
+
+  // Keyword preview badge
+  if (kwDisplay) {
+    const kw2 = kwInput ? extractKeyword(primaryField.value) || kwInput.value : '';
+    kwDisplay.textContent = kw2 || '—';
+  }
 }
+
+function updateHiddenFields() {
+  const kw = kwInput ? kwInput.value.trim() : '';
+  const mps = [...selected];
+
+  // Clear extra inputs
+  extraContainer.innerHTML = '';
+
+  if (!mps.length || !kw) {
+    // Keep existing primaryField value unchanged
+    return;
+  }
+
+  // Primary URL = first selected (prefer ebay for sold analysis)
+  const order = ['ebay','ka','vinted'];
+  const sorted = order.filter(m => mps.includes(m));
+  const primary = sorted[0];
+  const extras  = sorted.slice(1);
+
+  primaryField.value = MP_URLS[primary](kw);
+
+  extras.forEach(mp => {
+    const inp = document.createElement('input');
+    inp.type = 'hidden';
+    inp.name = 'extra_urls';
+    inp.value = MP_URLS[mp](kw);
+    extraContainer.appendChild(inp);
+  });
+
+  renderCards();
+}
+
+// Rebuild URLs on keyword change
+if (kwInput) kwInput.addEventListener('input', () => {
+  updateHiddenFields();
+  renderCards();
+});
+
+// Manual URL fallback
+if (manualInput) manualInput.addEventListener('input', () => {
+  primaryField.value = manualInput.value;
+});
+
+// ------------------------------------------------------------------ //
+// Buyback platform cards (existing)                                   //
+// ------------------------------------------------------------------ //
+document.querySelectorAll('.platform-card').forEach(card => {
+  card.addEventListener('click', () => {
+    const cb = card.querySelector('input[type="checkbox"]');
+    setTimeout(() => card.classList.toggle('selected', cb.checked), 0);
+  });
+});
 </script>
 </body>
 </html>
