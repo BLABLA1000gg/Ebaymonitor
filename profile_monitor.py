@@ -7,6 +7,7 @@ from pathlib import Path
 
 import concurrent.futures
 import json
+from decimal import Decimal
 
 import requests
 
