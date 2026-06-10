@@ -23,3 +23,5 @@ exports/
 .idea/
 .vscode/
 .DS_Store
+ebay_monitor.db-shm
+ebay_monitor.db-wal

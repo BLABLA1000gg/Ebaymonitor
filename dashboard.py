@@ -69,6 +69,10 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         saved = False
         with settings_store() as ss:
             if request.method == "POST":
+                # API keys are never rendered back into the form (secrets must
+                # not appear in HTML source). An empty submitted field means
+                # "keep the stored key"; only non-empty input replaces it.
+                stored = ss.load()
                 new_settings = AppSettings(
                     discord_webhook_url=request.form.get("discord_webhook_url", "").strip(),
                     check_interval_seconds=max(30, int(request.form.get("check_interval_seconds", "300") or 300)),
@@ -78,8 +82,10 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     browser_fetch=request.form.get("browser_fetch") == "on",
                     shipping_cost_eur=max(0.0, float(request.form.get("shipping_cost_eur") or 5.0)),
                     ebay_fee_rate=max(0.0, min(1.0, float(request.form.get("ebay_fee_rate") or 0.1235))),
-                    deepseek_api_key=request.form.get("deepseek_api_key", "").strip(),
-                    nvidia_api_key=request.form.get("nvidia_api_key", "").strip(),
+                    deepseek_api_key=(request.form.get("deepseek_api_key", "").strip()
+                                      or stored.deepseek_api_key),
+                    nvidia_api_key=(request.form.get("nvidia_api_key", "").strip()
+                                    or stored.nvidia_api_key),
                     ai_provider=request.form.get("ai_provider", "none").strip(),
                 )
                 ss.save(new_settings)
@@ -161,17 +167,24 @@ def create_app(database_path: str | Path | None = None) -> Flask:
         if len(q) < 3:
             return jsonify({"wirkaufens": [], "zoxs": [], "clevertronic": []})
 
-        # Run all three searches in parallel threads
+        # Run all three searches in parallel threads. A failing portal must
+        # not break the whole endpoint — return [] for that portal instead.
+        def _safe(future):
+            try:
+                return future.result()
+            except Exception:
+                return []
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
             wkfs_f = ex.submit(search_wirkaufens, q)
             zoxs_f = ex.submit(search_zoxs, q)
             ct_f   = ex.submit(search_clevertronic, q)
-
-        return jsonify({
-            "wirkaufens":   wkfs_f.result(),
-            "zoxs":         zoxs_f.result(),
-            "clevertronic": ct_f.result(),
-        })
+            result = {
+                "wirkaufens":   _safe(wkfs_f),
+                "zoxs":         _safe(zoxs_f),
+                "clevertronic": _safe(ct_f),
+            }
+        return jsonify(result)
 
     return app
 

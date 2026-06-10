@@ -459,3 +459,20 @@ th {
   /* Keep .wide spanning full width on mobile */
   .listing-cell { max-width: 200px; }
 }
+
+/* Ankaufspreis-Referenzbox (einmalig über der Deals-Tabelle) */
+.buyback-ref { margin-bottom: 14px; }
+.buyback-ref-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.buyback-ref-grid h4 { margin: 0 0 8px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.buyback-ref-grid .ct-badge { margin: 2px 3px 2px 0; }
+@media (max-width: 900px) { .buyback-ref-grid { grid-template-columns: 1fr; } }
+
+/* Formular-Aktionszeile */
+.actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 6px; }
+
+/* KI-Risiko-Badge + Begründung */
+.risk-badge { display: inline-block; border-radius: 6px; padding: 1px 7px; font-size: 10px; font-weight: 700; margin-left: 4px; vertical-align: middle; }
+.risk-niedrig { background: rgba(74,222,128,.15); color: #4ade80; }
+.risk-mittel  { background: rgba(244,184,96,.15); color: #f4b860; }
+.risk-hoch    { background: rgba(255,107,122,.15); color: #ff6b7a; }
+.ai-reason { font-size: 11px; color: var(--muted); margin-top: 4px; max-width: 240px; line-height: 1.35; }

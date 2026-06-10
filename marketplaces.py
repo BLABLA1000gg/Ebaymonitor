@@ -1,4 +1,5 @@
 from __future__ import annotations
+import threading
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
@@ -100,6 +101,7 @@ def parse_vinted_listings(html: str) -> list[Listing]:
 
 
 _EBAY_CURL_SESSION: "CurlSession | None" = None  # type: ignore[type-arg]
+_EBAY_CURL_SESSION_LOCK = threading.Lock()
 
 _EBAY_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -132,10 +134,11 @@ def _fetch_ebay(url: str, headers: dict, timeout: int):
     parsed = urlparse(url)
     base_url = f"{parsed.scheme}://{parsed.netloc}/"
 
-    if _EBAY_CURL_SESSION is None:
-        _EBAY_CURL_SESSION = CurlSession(impersonate="chrome120")
-        # Seed the session with homepage cookies so eBay accepts search requests
-        _EBAY_CURL_SESSION.get(base_url, headers=_EBAY_HEADERS, timeout=timeout)
+    with _EBAY_CURL_SESSION_LOCK:
+        if _EBAY_CURL_SESSION is None:
+            _EBAY_CURL_SESSION = CurlSession(impersonate="chrome120")
+            # Seed the session with homepage cookies so eBay accepts search requests
+            _EBAY_CURL_SESSION.get(base_url, headers=_EBAY_HEADERS, timeout=timeout)
 
     search_headers = _EBAY_HEADERS.copy()
     search_headers["Sec-Fetch-Site"] = "same-origin"

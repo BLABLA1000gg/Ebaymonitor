@@ -88,7 +88,33 @@ def is_actual_device(title: str, description: str = "") -> bool:
 
 _device_cache: dict[str, bool] = {}
 _cond_cache: dict[str, int] = {}
-_assess_cache: dict[str, dict] = {}  # title → full assessment dict
+_assess_cache: dict[str, dict] = {}  # cache key → full assessment dict
+
+
+def trim_caches(max_entries: int = 5000) -> None:
+    """Drop in-memory AI caches once they grow past max_entries.
+
+    The dashboard monitor loop runs for days; without a bound these caches
+    grow with every unique listing ever seen. A full clear is fine — entries
+    are cheap to recompute and stale assessments are worthless anyway.
+    """
+    for cache in (_device_cache, _cond_cache, _assess_cache,
+                  _IMAGE_CACHE, _LISTING_IMG_CACHE):
+        if len(cache) > max_entries:
+            cache.clear()
+
+
+def _assess_key(title: str, description: str = "", extra: str = "") -> str:
+    """Cache key for AI assessments.
+
+    Must include the description (not just the title): two listings with the
+    same title ("Apple iPhone 13 Pro") but different descriptions are
+    different phones — reusing the first assessment for the second could mark
+    a broken phone as functional.
+    """
+    return (title.strip().lower()[:100]
+            + "|" + str(hash(description.strip().lower()[:600]))
+            + ("|" + extra if extra else ""))
 
 
 def ai_is_device(
@@ -187,7 +213,7 @@ def ai_detect_condition(
     if not api_key or provider == "none":
         return None
 
-    cache_key = title.strip().lower()[:100]
+    cache_key = _assess_key(title, description)
     if cache_key in _cond_cache:
         return _cond_cache[cache_key]
 
@@ -220,8 +246,8 @@ def ai_detect_condition_batch(
     uncached_indices: list[int] = []
 
     # Fill from cache first
-    for i, (title, _) in enumerate(listings):
-        key = title.strip().lower()[:100]
+    for i, (title, desc) in enumerate(listings):
+        key = _assess_key(title, desc)
         if key in _cond_cache:
             results[i] = _cond_cache[key]
         else:
@@ -258,7 +284,7 @@ def ai_detect_condition_batch(
                 if 0 <= s <= 5:
                     i = uncached_indices[j]
                     results[i] = s
-                    _cond_cache[listings[i][0].strip().lower()[:100]] = s
+                    _cond_cache[_assess_key(listings[i][0], listings[i][1])] = s
             except (TypeError, ValueError):
                 pass
 
@@ -294,8 +320,8 @@ def ai_assess_listing_batch(
     results: list[dict | None] = [None] * len(listings)
     uncached: list[int] = []
 
-    for i, (title, _) in enumerate(listings):
-        key = title.strip().lower()[:100]
+    for i, (title, desc) in enumerate(listings):
+        key = _assess_key(title, desc)
         if key in _assess_cache:
             results[i] = _assess_cache[key].copy()
         else:
@@ -388,8 +414,9 @@ def ai_assess_listing_batch(
                 "has_cable":   bool(raw.get("has_cable", False)),
             }
             results[i] = d
-            _assess_cache[title.strip().lower()[:100]] = d
-            _cond_cache[title.strip().lower()[:100]] = d["condition"]
+            k = _assess_key(title, listings[i][1])
+            _assess_cache[k] = d
+            _cond_cache[k] = d["condition"]
 
     except Exception:
         pass
@@ -605,6 +632,15 @@ def detect_condition(
         key = platform_condition.strip().lower()
         if key in _EBAY_PLATFORM_COND:
             return _EBAY_PLATFORM_COND[key]
+        # Substring fallback: eBay.de uses longer labels like
+        # "Für Ersatzteile oder defekt" that exact lookup misses. A parts
+        # listing slipping through as unlabeled would be a guaranteed loss,
+        # so broken indicators are checked as substrings.
+        if any(s in key for s in ("ersatzteile", "defekt", "for parts", "not working")):
+            return COND_BROKEN
+        for label, score in _EBAY_PLATFORM_COND.items():
+            if label in key:
+                return score
 
     # 2) AI detection — reads the actual listing text
     if api_key and provider != "none":
@@ -652,16 +688,17 @@ def matched_buyback_price(
     if condition_score == COND_BROKEN:
         return result
 
+    # FIXED CONSERVATIVE TIERS — independent of the detected condition.
+    # Portals routinely downgrade on arrival; pricing every deal at these
+    # worst-case-realistic tiers guarantees the calculated profit is a FLOOR,
+    # never an estimate that can disappoint:
+    #   ZOXS         → "Gut"
+    #   WirKaufens   → "In Ordnung"
+    #   Clevertronic → "Gebraucht"
+    # The AI condition is still used for filtering (broken/non-functional →
+    # skip), just never for picking a higher payout tier.
     if zoxs_prices:
-        key = _ZOXS_MAP.get(condition_score, "4")
-        # Keys in stored dict are the condition LABELS (e.g. "Sehr gut": "150.00")
-        # Try by label that matches the key
-        zoxs_label_map = {
-            "1": "Wie neu", "2": "Hervorragend", "3": "Sehr gut",
-            "4": "Gut", "65": "Stark gebraucht",
-        }
-        label = zoxs_label_map.get(key, "Gut")
-        val = zoxs_prices.get(label)
+        val = zoxs_prices.get("Gut") or zoxs_prices.get("Stark gebraucht")
         if val:
             try:
                 result["zoxs"] = Decimal(str(val))
@@ -669,12 +706,7 @@ def matched_buyback_price(
                 pass
 
     if wkfs_prices:
-        key = _WKFS_MAP.get(condition_score, "2")
-        wkfs_label_map = {
-            "5": "Neu", "4": "Wie Neu", "3": "Gut", "2": "In Ordnung", "1": "Schlecht",
-        }
-        label = wkfs_label_map.get(key, "In Ordnung")
-        val = wkfs_prices.get(label)
+        val = wkfs_prices.get("In Ordnung") or wkfs_prices.get("Schlecht")
         if val:
             try:
                 result["wirkaufens"] = Decimal(str(val))
@@ -682,13 +714,15 @@ def matched_buyback_price(
                 pass
 
     if clevertronic_prices:
-        prefix = _CLEVERTRONIC_PREF.get(condition_score, "Gut")
-        for k, v in clevertronic_prices.items():
-            if k.startswith(prefix):
-                try:
-                    result["clevertronic"] = Decimal(str(v))
-                except Exception:
-                    pass
+        for prefix in ("Gebraucht", "Akze"):  # fall back one tier DOWN only
+            for k, v in clevertronic_prices.items():
+                if k.startswith(prefix):
+                    try:
+                        result["clevertronic"] = Decimal(str(v))
+                    except Exception:
+                        pass
+                    break
+            if result["clevertronic"] is not None:
                 break
 
     return result
@@ -790,7 +824,9 @@ def _fetch_ka_details(url: str) -> tuple[list[str], str]:
         desc_el = soup.find(id="viewad-description-text")
         description = desc_el.get_text(" ", strip=True) if desc_el else ""
         return imgs, description
-    except Exception:
+    except Exception as e:
+        import logging
+        logging.getLogger("condition_detect").warning("KA detail fetch failed for %s: %r", url[-50:], e)
         return [], ""
 
 
@@ -818,13 +854,44 @@ def _fetch_vinted_details(url: str) -> tuple[list[str], str]:
         description = ""
 
         # ── Description ──────────────────────────────────────────────────
-        # Embedded as "description":"..." in a JSON blob in the HTML
-        m = re.search(r'"description":"((?:[^"\\]|\\.)*)"', text)
-        if m:
+        # Embedded as "description":"..." in a JSON blob in the HTML.
+        # The page contains MANY "description" fields (og:meta, site config,
+        # related items) — verifying the wrong one would silently pass a
+        # broken phone. Anchor on the item JSON ('"item":{') when present;
+        # otherwise take the longest candidate (item descriptions are seller
+        # free-text, meta descriptions are short marketing strings).
+        raw_desc = ""
+        item_anchor = text.find('"item":{')
+        if item_anchor >= 0:
+            m = re.search(r'"description":"((?:[^"\\]|\\.)*)"', text[item_anchor:])
+            if m:
+                raw_desc = m.group(1)
+        if not raw_desc:
+            candidates = re.findall(r'"description":"((?:[^"\\]|\\.)*)"', text)
+            if candidates:
+                raw_desc = max(candidates, key=len)
+        if raw_desc:
             try:
-                description = _json.loads('"' + m.group(1) + '"')  # unescape JSON string
+                description = _json.loads('"' + raw_desc + '"')  # unescape JSON string
             except Exception:
-                description = m.group(1).replace("\\n", "\n").replace('\\"', '"')
+                description = raw_desc.replace("\\n", "\n").replace('\\"', '"')
+
+        # ── Storage attribute ────────────────────────────────────────────
+        # Vinted sellers often set the storage size only as a platform
+        # attribute, never in the free text. The attribute renders as e.g.
+        # "256 GB" in the page. Accept it ONLY when the whole page names
+        # exactly one plausible size — multiple sizes could come from
+        # related-item widgets and must not be guessed from.
+        if description and not re.search(r'\b\d{2,4}\s?(?:gb|go)\b|\b\d\s?tb\b',
+                                         description, re.IGNORECASE):
+            page_sizes = {
+                int(m) for m in re.findall(r'\b(\d{2,4})\s?(?:gb|go)\b', text, re.IGNORECASE)
+            } & {16, 32, 64, 128, 256, 512}
+            page_sizes |= {
+                int(m) * 1024 for m in re.findall(r'\b(\d)\s?tb\b', text, re.IGNORECASE)
+            } & {1024}
+            if len(page_sizes) == 1:
+                description += f"\n[Vinted-Attribut: {page_sizes.pop()} GB]"
 
         # ── Photos ───────────────────────────────────────────────────────
         # Real listing photos come from images*.vinted.net CDN
@@ -1057,16 +1124,17 @@ def ai_assess_listing_full(
 
     _json = json
 
-    # Fetch images + description from listing page
+    # Fetch images + description from listing page.
+    # Vinted is NOT fetched here: detail-page requests are rate-limited per IP
+    # and must go through the caller's throttled fetcher (profile_monitor
+    # Guard 3b). The catalog thumbnail (image_url) is sufficient for vision.
     images: list[str] = []
     fetched_desc = ""
     if listing_url:
         try:
             if "kleinanzeigen.de" in listing_url:
                 images, fetched_desc = _fetch_ka_details(listing_url)
-            elif "vinted." in listing_url:
-                images, fetched_desc = _fetch_vinted_details(listing_url)
-            else:
+            elif "vinted." not in listing_url:
                 images = fetch_listing_images(listing_url)
         except Exception:
             pass
@@ -1082,8 +1150,8 @@ def ai_assess_listing_full(
     if not description and fetched_desc:
         description = fetched_desc
 
-    # Cache key: title + first image URL
-    cache_key = (title.strip().lower()[:80] + "|" + (images[0] if images else ""))
+    # Cache key: title + description + first image URL
+    cache_key = _assess_key(title, description, extra=(images[0] if images else ""))
     if cache_key in _assess_cache:
         return _assess_cache[cache_key].copy()
 
@@ -1119,9 +1187,15 @@ def ai_assess_listing_full(
         "has_cable: true if original cable/charger mentioned\n\n"
         "IMPORTANT: photo overrides text — if photo shows damage not mentioned in text, "
         "use the lower condition. When in doubt, grade ONE level lower (be conservative).\n\n"
+        "risk: your confidence that buying this BLIND (sight unseen, with real money) is safe:\n"
+        "  'niedrig' = clearly a clean working phone, photos+text consistent\n"
+        "  'mittel'  = probably fine but some uncertainty (few photos, vague text)\n"
+        "  'hoch'    = red flags: possible hidden damage, contradictions, too cheap, vague\n"
+        "reason: ONE short German sentence (max 12 words) explaining your condition+risk.\n\n"
         "Reply with ONLY a JSON object, no text before or after:\n"
         '{"condition": <0-5>, "functional": <true/false>, '
-        '"battery_ok": <true/false>, "has_box": <true/false>, "has_cable": <true/false>}'
+        '"battery_ok": <true/false>, "has_box": <true/false>, "has_cable": <true/false>, '
+        '"risk": "<niedrig/mittel/hoch>", "reason": "<kurze Begründung>"}'
     )})
 
     try:
@@ -1131,20 +1205,23 @@ def ai_assess_listing_full(
             model=_VISION_MODEL,
             messages=[{"role": "user", "content": content}],
             temperature=0,
-            max_tokens=80,
+            max_tokens=160,
             stream=False,
         )
         text = resp.choices[0].message.content.strip()
-        m = re.search(r"\{[^}]+\}", text, re.DOTALL)
+        m = re.search(r"\{.*\}", text, re.DOTALL)
         if not m:
             return None
         raw = _json.loads(m.group())
+        risk = str(raw.get("risk", "")).strip().lower()
         result = {
             "condition":  max(0, min(5, int(raw.get("condition", COND_GOOD)))),
             "functional": bool(raw.get("functional", True)),
             "battery_ok": bool(raw.get("battery_ok", True)),
             "has_box":    bool(raw.get("has_box", False)),
             "has_cable":  bool(raw.get("has_cable", False)),
+            "risk":       risk if risk in ("niedrig", "mittel", "hoch") else "mittel",
+            "reason":     str(raw.get("reason", "")).strip()[:120],
         }
         _assess_cache[cache_key] = result
         return result

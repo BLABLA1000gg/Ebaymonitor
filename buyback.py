@@ -26,12 +26,15 @@ Usage
 from __future__ import annotations
 
 import json
+import logging
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
+
+LOGGER = logging.getLogger(__name__)
 
 CLEVERTRONIC_CONDITIONS = ("Neu", "Wie neu", "Sehr gut", "Gut", "Akzeptabel", "Gebraucht")
 ZOXS_SKIP_CONDITIONS = {"Neu", "Schlecht"}
@@ -64,6 +67,9 @@ class BuybackScraper:
 
     def __enter__(self) -> "BuybackScraper":
         self._pw = sync_playwright().start()
+        # headless=False + --headless=new is intentional: Playwright's default
+        # headless mode is detected by the portals' bot checks, Chrome's "new"
+        # headless (passed as a raw flag) is not. Do not "simplify" this.
         self._browser = self._pw.chromium.launch(
             headless=False,
             args=[
@@ -255,30 +261,32 @@ class BuybackScraper:
             if not conditions:
                 return result
 
-            # Click the first condition to trigger one API call → captures articleId + questions
-            first_cid, _ = conditions[0]
-            try:
-                page.locator(f'[id="{first_cid}ConditionLabel"]:visible').first.click(timeout=6000)
-                page.wait_for_timeout(1800)
-            except Exception:
-                pass
+            # Click a condition to trigger one API call → captures articleId +
+            # questions. Retry with the second condition if the first click
+            # doesn't fire the request (timing / overlay issues).
+            for cid, _name in conditions[:2]:
+                try:
+                    page.locator(f'[id="{cid}ConditionLabel"]:visible').first.click(timeout=6000)
+                    page.wait_for_timeout(2200)
+                except Exception:
+                    continue
+                if captured.get("articleId"):
+                    break
 
             if not captured.get("articleId") or not captured.get("questions"):
                 return result  # page probably shows "we don't buy this" message
 
             article_id = captured["articleId"]
-            # Start with captured questions (device-specific), then override
-            # with our AI-assessed answers where we know the question IDs.
-            questions = dict(captured["questions"])
-            # Inject AI-assessed answers into the questions dict.
-            # ZOXS question IDs (common for smartphones — may vary by product):
-            # We update keys we know about; unknown keys keep their captured value.
-            _Q_FUNCTIONAL = None  # discovered dynamically from page
-            _Q_BATTERY    = None
-            _Q_BOX        = None
-            _Q_CABLE      = None
+            # The captured questions payload is a LIST of dicts:
+            #   [{"id": 370, "userSelect": true}, ..., {"id": 378, "userSelect": "891"}]
+            # Boolean userSelect entries are the Ja/Nein questions; the page
+            # pre-selects the best answers ("Ja"). Non-boolean entries (e.g.
+            # storage selects) must be passed through unchanged.
+            questions = [dict(q) for q in captured["questions"]]
 
-            # Read question metadata from the page to map ID → meaning
+            # Map question id → meaning from the page DOM so AI-assessed
+            # answers can be injected (only relevant when called with
+            # functional=False etc. — full-table scrapes keep the defaults).
             q_meta = page.evaluate("""() => {
                 return [...document.querySelectorAll('.questionItem, [data-question-id]')]
                     .map(el => ({
@@ -286,29 +294,33 @@ class BuybackScraper:
                         text: el.textContent.toLowerCase().trim().slice(0, 80)
                     }));
             }""")
+            answers: dict[str, bool] = {}
             for qm in (q_meta or []):
                 t = qm.get("text", "")
-                qid = str(qm.get("id", "")).strip()
-                if not qid:
+                # DOM ids may be prefixed (e.g. "question-370") — keep digits only
+                digits = re.sub(r"\D", "", str(qm.get("id", "")))
+                if not digits:
                     continue
                 if any(kw in t for kw in ("funktionsfähig", "funktionstüchtig", "working", "funktion")):
-                    _Q_FUNCTIONAL = qid
+                    answers[digits] = functional
                 elif any(kw in t for kw in ("akku", "batterie", "battery")):
-                    _Q_BATTERY = qid
+                    answers[digits] = battery_ok
                 elif any(kw in t for kw in ("ovp", "originalverpack", "box", "karton")):
-                    _Q_BOX = qid
+                    answers[digits] = has_box
                 elif any(kw in t for kw in ("kabel", "cable", "lightning", "usb")):
-                    _Q_CABLE = qid
-
-            # Apply AI-determined answers (1=Ja, 0=Nein)
-            if _Q_FUNCTIONAL and _Q_FUNCTIONAL in questions:
-                questions[_Q_FUNCTIONAL] = 1 if functional else 0
-            if _Q_BATTERY and _Q_BATTERY in questions:
-                questions[_Q_BATTERY] = 1 if battery_ok else 0
-            if _Q_BOX and _Q_BOX in questions:
-                questions[_Q_BOX] = 1 if has_box else 0
-            if _Q_CABLE and _Q_CABLE in questions:
-                questions[_Q_CABLE] = 1 if has_cable else 0
+                    answers[digits] = has_cable
+            injected = 0
+            for q in questions:
+                qid = str(q.get("id", ""))
+                if qid in answers and isinstance(q.get("userSelect"), bool):
+                    q["userSelect"] = answers[qid]
+                    injected += 1
+            if injected == 0 and not (has_box and has_cable):
+                # Page defaults answer every bonus question with "Ja" —
+                # without injection the quoted prices include box/cable
+                # bonuses we don't have, overstating payouts by ~€5-15.
+                LOGGER.warning("ZOXS: no assessment answers injected (%d questions) — "
+                               "prices may include box/cable bonus", len(questions))
 
             # Now call sys_article_price.php for every condition via the browser's fetch()
             # (browser carries Cloudflare CF cookies; direct requests would be blocked)

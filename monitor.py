@@ -246,6 +246,12 @@ def scan_once(session: requests.Session, store: MonitorStore, config: Config, in
                 )
                 if config.listing_filter.matches(listing)
             ]
+            # Legacy CLI path — the dashboard uses controller.py/profile_monitor.py.
+            # MonitorStore no longer implements record_search_statistics; skip
+            # statistics instead of crashing if this path is ever invoked.
+            if not hasattr(store, "record_search_statistics"):
+                LOGGER.warning("Sold statistics skipped: store has no record_search_statistics (legacy path)")
+                continue
             stats = store.record_search_statistics(sold_url, keyword_signature, sold_listings)
             LOGGER.info(
                 "Sold statistics: %s results, average=%s, median=%s, min=%s, max=%s",

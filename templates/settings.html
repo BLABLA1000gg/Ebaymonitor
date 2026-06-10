@@ -11,58 +11,58 @@
 <body>
 <header>
   <div>
-    <p class="eyebrow">CONFIGURATION</p>
-    <h1>Settings</h1>
+    <p class="eyebrow">EBAYMONITOR</p>
+    <h1>Einstellungen</h1>
   </div>
-  <a href="{{ url_for('index') }}">Back to dashboard</a>
+  <a href="{{ url_for('index') }}">Zurück zum Dashboard</a>
 </header>
 
 <main>
   {% if saved %}
-  <div class="notice success">Settings saved.</div>
+  <div class="notice success">Einstellungen gespeichert.</div>
   {% endif %}
 
   <form class="form" method="post">
 
-    <h2 class="wide section-heading">Notifications</h2>
+    <h2 class="wide section-heading">Benachrichtigungen</h2>
 
     <label class="wide">
-      Discord webhook URL
+      Discord-Webhook-URL
       <input type="url" name="discord_webhook_url"
              value="{{ s.discord_webhook_url }}"
              placeholder="https://discord.com/api/webhooks/...">
-      <span class="hint">Leave blank to disable Discord notifications.</span>
+      <span class="hint">Leer lassen, um Discord-Benachrichtigungen zu deaktivieren.</span>
     </label>
 
     <label class="check wide">
       <input type="checkbox" name="notify_existing" {% if s.notify_existing %}checked{% endif %}>
-      Notify about listings that already exist on the first scan
+      Auch über Anzeigen benachrichtigen, die beim ersten Scan bereits existieren
     </label>
 
     <label class="check wide">
       <input type="checkbox" name="notify_price_increases" {% if s.notify_price_increases %}checked{% endif %}>
-      Notify when a price increases (not just drops)
+      Auch bei Preiserhöhungen benachrichtigen (nicht nur bei Preissenkungen)
     </label>
 
     <label class="check wide">
       <input type="checkbox" name="notify_statistics" {% if s.notify_statistics %}checked{% endif %}>
-      Send a sold-price statistics summary after each eBay scan
+      Nach jedem eBay-Scan eine Verkaufspreis-Statistik senden
     </label>
 
-    <h2 class="wide section-heading">Flip profit calculator</h2>
+    <h2 class="wide section-heading">Profit-Rechner</h2>
 
     <label>
-      Shipping cost (€)
+      Versandkosten (€)
       <input type="number" step="0.01" min="0" name="shipping_cost_eur"
              value="{{ '%.2f'|format(s.shipping_cost_eur) }}">
-      <span class="hint">Outbound shipping deducted from profit estimate. Default 5.00 € (DHL Päckchen M).</span>
+      <span class="hint">Versand zum Ankaufsportal, wird vom Profit abgezogen. Standard 5,00 € (DHL Päckchen M).</span>
     </label>
 
     <label>
-      eBay final-value fee rate
+      eBay-Verkaufsprovision
       <input type="number" step="0.0001" min="0" max="1" name="ebay_fee_rate"
              value="{{ '%.4f'|format(s.ebay_fee_rate) }}">
-      <span class="hint">As a decimal, e.g. 0.1235 = 12.35%. Default for smartphones (DE private sellers).</span>
+      <span class="hint">Als Dezimalzahl, z.&nbsp;B. 0,1235 = 12,35&nbsp;%. Standard für Smartphones (private Verkäufer DE).</span>
     </label>
 
     <h2 class="wide section-heading">Arbitrage &amp; KI</h2>
@@ -70,7 +70,7 @@
     <label class="wide">
       KI-Provider für Spec-Erkennung
       <select name="ai_provider" id="ai_provider_select" onchange="toggleKeyFields()">
-        <option value="none"     {% if s.ai_provider == 'none'     %}selected{% endif %}>Kein KI (nur Regex)</option>
+        <option value="none"     {% if s.ai_provider == 'none'     %}selected{% endif %}>Keine KI (nur Regex)</option>
         <option value="nvidia"   {% if s.ai_provider == 'nvidia'   %}selected{% endif %}>NVIDIA NIM — kostenlos (Llama 3.1)</option>
         <option value="deepseek" {% if s.ai_provider == 'deepseek' %}selected{% endif %}>DeepSeek — günstig</option>
       </select>
@@ -83,9 +83,9 @@
     <div id="field-nvidia" style="display:none">
       <label class="wide">
         NVIDIA NIM API Key
-        <input type="password" name="nvidia_api_key"
-               value="{{ s.nvidia_api_key }}"
-               placeholder="nvapi-...">
+        <input type="password" name="nvidia_api_key" autocomplete="off"
+               value=""
+               placeholder="{{ '•••• gespeichert — leer lassen zum Behalten' if s.nvidia_api_key else 'nvapi-...' }}">
         <span class="hint">
           Gratis Credits: <a href="https://build.nvidia.com" target="_blank" style="color:var(--accent)">build.nvidia.com</a>
         </span>
@@ -95,9 +95,9 @@
     <div id="field-deepseek" style="display:none">
       <label class="wide">
         DeepSeek API Key
-        <input type="password" name="deepseek_api_key"
-               value="{{ s.deepseek_api_key }}"
-               placeholder="sk-...">
+        <input type="password" name="deepseek_api_key" autocomplete="off"
+               value=""
+               placeholder="{{ '•••• gespeichert — leer lassen zum Behalten' if s.deepseek_api_key else 'sk-...' }}">
         <span class="hint">
           Key: <a href="https://platform.deepseek.com" target="_blank" style="color:var(--accent)">platform.deepseek.com</a>
         </span>
@@ -113,27 +113,27 @@
       toggleKeyFields();
     </script>
 
-    <h2 class="wide section-heading">Scanning</h2>
+    <h2 class="wide section-heading">Scan</h2>
 
     <label>
-      Scan interval (seconds)
+      Scan-Intervall (Sekunden)
       <input type="number" name="check_interval_seconds" min="30" max="86400"
              value="{{ s.check_interval_seconds }}">
-      <span class="hint">Minimum 30 s. Default 300 s (5 min).</span>
+      <span class="hint">Minimum 30&nbsp;s. Standard 300&nbsp;s (5&nbsp;Min).</span>
     </label>
 
     <label class="check wide">
       <input type="checkbox" name="browser_fetch" {% if s.browser_fetch %}checked{% endif %}>
-      Use Chromium for fetching (BROWSER_FETCH)
+      Chromium zum Abrufen verwenden (BROWSER_FETCH)
       <span class="hint">
-        Falls back to curl_cffi Chrome impersonation when unchecked.
-        Enable this if eBay still returns 403 on your IP.
-        Requires <code>playwright install chromium</code>.
+        Ohne Häkchen wird curl_cffi mit Chrome-Fingerprint verwendet.
+        Aktivieren, falls eBay für deine IP weiterhin 403 liefert.
+        Benötigt <code>playwright install chromium</code>.
       </span>
     </label>
 
     <div class="actions wide">
-      <button class="button" type="submit">Save settings</button>
+      <button class="button" type="submit">Einstellungen speichern</button>
     </div>
 
   </form>

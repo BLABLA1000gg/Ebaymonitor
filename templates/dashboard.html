@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Dashboard — EbayMonitor</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📱</text></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='48' fill='%230b0f16'/><text x='50' y='68' font-size='60' text-anchor='middle' fill='%234ade80' font-family='sans-serif'>€</text></svg>">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"
-          integrity="sha384-/SCUSdRGDEV5RKgNfJKxAU0vNLfSPpYyVi2KPRkxWfOvBi0LRSReEm4TupANPzK"
+          integrity="sha384-RuyvpeZCxMJCqVUGFI0Do1mQrods/hhxYlcVfGZOfQtTHC8gBzqYUySpAuEEPk0Z"
           crossorigin="anonymous"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='controls.css') }}">
@@ -15,7 +15,7 @@
 
 <header>
   <div>
-    <span class="eyebrow" aria-hidden="true">EBAY MONITOR</span>
+    <span class="eyebrow" aria-hidden="true">EBAYMONITOR</span>
     <h1>Marktplatz-Monitor</h1>
   </div>
   <nav class="header-nav">
@@ -32,7 +32,7 @@
       <span id="monitor-dot" class="status-dot {% if monitor_status.running %}running{% endif %}"></span>
       <strong id="monitor-state">
         {% if monitor_status.scanning %}Scan läuft…
-        {% elif monitor_status.running %}Monitor aktiv
+        {% elif monitor_status.running %}Monitor läuft
         {% else %}Monitor gestoppt
         {% endif %}
       </strong>
@@ -82,7 +82,7 @@
   {# ── Leerer Zustand ───────────────────────────────────────────── #}
   {% if not profiles %}
     <section class="empty">
-      <h2>Erstes Suchprofil anlegen</h2>
+      <h2>Erstes Suchprofil erstellen</h2>
       <p>Konfiguriere eine eBay-, Kleinanzeigen- oder Vinted-Suche mit Filtern.<br>
          eBay-Verkaufsanalysen sind für Arbitrage-Kalkulationen verfügbar.</p>
       <a class="button" href="{{ url_for('profile_form') }}">Profil erstellen</a>
@@ -97,7 +97,7 @@
         <h2>{{ current.name }}</h2>
         <p>{{ current.include_keywords or 'Keine Pflicht-Keywords' }}</p>
       </div>
-      <a class="edit-link" href="{{ url_for('profile_form', profile_id=current.id) }}">Konfiguration bearbeiten</a>
+      <a class="edit-link" href="{{ url_for('profile_form', profile_id=current.id) }}">Profil bearbeiten</a>
     </section>
 
     {# ── KPIs ────────────────────────────────────────────────────── #}
@@ -108,25 +108,25 @@
         <strong class="{% if worth_it_count > 0 %}demand high{% endif %}">{{ worth_it_count }}</strong>
       </article>
       <article>
-        <span>eBay Medianpreis (verk.)</span>
-        <strong>{{ snapshot.median_sold_price if snapshot else 'k.A.' }} {{ current.currency or '' }}</strong>
+        <span>Verkaufs-Median</span>
+        <strong>{% if snapshot and snapshot.median_sold_price is not none %}{{ snapshot.median_sold_price }}&nbsp;{{ current.currency or '€' }}{% else %}k.A.{% endif %}</strong>
       </article>
       <article>
         <span>Verkäufe / Monat</span>
         <strong>{{ '%.1f'|format(snapshot.sold_per_month|float) if snapshot else 'k.A.' }}</strong>
       </article>
       <article>
-        <span>Verkaufsquote</span>
+        <span>Abverkaufsrate</span>
         <strong>{{ '%.0f%%'|format(snapshot.sell_through_rate|float * 100) if snapshot and snapshot.sell_through_rate else 'k.A.' }}</strong>
       </article>
       <article>
-        <span>Ø Tage bis Verkauf</span>
+        <span>Verkaufsdauer (Tage)</span>
         <strong>{{ '%.0f'|format(snapshot.estimated_days_to_sell|float) if snapshot and snapshot.estimated_days_to_sell else 'k.A.' }}</strong>
       </article>
       <article>
         <span>Nachfrage</span>
         <strong class="demand {{ snapshot.demand if snapshot else '' }}">
-          {{ snapshot.demand | capitalize if snapshot else 'k.A.' }}
+          {% if snapshot %}{{ {'low': 'Niedrig', 'medium': 'Mittel', 'high': 'Hoch'}.get(snapshot.demand, snapshot.demand | capitalize) }}{% else %}k.A.{% endif %}
         </strong>
       </article>
     </section>
@@ -135,24 +135,57 @@
     <section class="charts">
       <article>
         <h3>Verkaufspreis-Trend</h3>
-        <canvas id="priceChart"><p>Diagramm konnte nicht geladen werden.</p></canvas>
+        <canvas id="priceChart">Chart konnte nicht geladen werden.</canvas>
       </article>
       <article>
         <h3>Nachfrage-Trend</h3>
-        <canvas id="demandChart"><p>Diagramm konnte nicht geladen werden.</p></canvas>
+        <canvas id="demandChart">Chart konnte nicht geladen werden.</canvas>
       </article>
     </section>
 
     {# ── Deals-Tabelle ───────────────────────────────────────────── #}
     {% set has_flip    = deals and deals|selectattr('ref_median')|list|length > 0 %}
     {% set has_buyback = deals and (deals[0].zoxs_prices or deals[0].wirkaufens_prices or deals[0].clevertronic_prices) %}
-    {% set col_count   = 5 + (3 if has_flip else 0) + (2 if has_buyback else 0) + (1 if has_buyback and deals[0].clevertronic_prices is not none else 0) + (1 if has_buyback and deals[0].zoxs_prices is not none else 0) + (1 if has_buyback and deals[0].wirkaufens_prices is not none else 0) %}
+    {% set has_score   = snapshot and snapshot.median_sold_price is not none %}
+    {% set col_count   = 4 + (1 if has_score else 0) + (3 if has_flip else 0) + (2 if has_buyback else 0) %}
+
+    {% macro de_eur(value) %}{{ ('%.2f'|format(value|float))|replace('.', ',') }}&nbsp;€{% endmacro %}
+
+    {# ── Ankaufspreis-Referenz (einmal, nicht pro Zeile) ─────────── #}
+    {% if has_buyback %}
+    <section class="panel buyback-ref">
+      <div class="panel-title">
+        <h3>Ankaufspreise (Referenz)</h3>
+        <span>Häufigste Speichergröße des Profils — Bewertung je Anzeige nutzt deren eigene Größe</span>
+      </div>
+      {% set cond_order = ['Neu', 'Wie neu', 'Wie Neu', 'Hervorragend', 'Sehr gut',
+                           'Gut', 'In Ordnung', 'Gebraucht', 'Akzeptabel',
+                           'Stark gebraucht', 'Schlecht', 'Beschädigt'] %}
+      <div class="buyback-ref-grid">
+        {% for portal, prices, cls in [
+              ('Clevertronic', deals[0].clevertronic_prices, 'ct-badge'),
+              ('ZOXS',         deals[0].zoxs_prices,         'ct-badge zoxs-badge'),
+              ('WirKaufens',   deals[0].wirkaufens_prices,   'ct-badge wkfs-badge')] %}
+          {% if prices %}
+          <div>
+            <h4>{{ portal }}</h4>
+            {% for cond in cond_order %}
+              {% if cond in prices %}
+                <span class="{{ cls }}" title="{{ cond }}">{{ cond }}: {{ de_eur(prices[cond]) }}</span>
+              {% endif %}
+            {% endfor %}
+          </div>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
 
     <section class="panel">
       <div class="panel-title">
         <div>
           <h3>Aktuelle Deals</h3>
-          <p>Score 50 = eBay-Median &nbsp;·&nbsp; ✅ = Lohnt sich zum Kauf</p>
+          <p>{% if has_score %}Score 50 = eBay-Median &nbsp;·&nbsp; {% endif %}✅ = Lohnt sich zum Kauf</p>
         </div>
         <label class="filter-toggle">
           <input type="checkbox" id="filter-worth-it"> Nur lohnenswerte anzeigen
@@ -164,35 +197,27 @@
           <thead>
             <tr>
               <th aria-label="Lohnt sich">Deal</th>
-              <th>Inserat</th>
+              <th>Anzeige</th>
               <th>Preis</th>
+              {% if has_score %}
               <th>Score
                 <span class="tooltip-icon" title="Score = Angebotspreis ÷ eBay-Median × 100. Score 50 = halber Medianpreis — möglicher 2×-Flip.">?</span>
               </th>
-              <th>Eingestellt</th>
+              {% endif %}
+              <th>Entdeckt</th>
               {% if has_flip %}
                 <th>eBay Median</th>
-                <th>eBay Flip-Gewinn</th>
+                <th>Profit</th>
                 <th>ROI</th>
               {% endif %}
               {% if has_buyback %}
-                <th>KI-Zustand</th>
-                <th>Ankauf-Gewinn</th>
+                <th>Zustand</th>
+                <th>Profit (Ankauf)</th>
               {% endif %}
-              {% if has_buyback and deals[0].clevertronic_prices is not none %}
-                <th>Clevertronic</th>
-              {% endif %}
-              {% if has_buyback and deals[0].zoxs_prices is not none %}
-                <th>ZOXS</th>
-              {% endif %}
-              {% if has_buyback and deals[0].wirkaufens_prices is not none %}
-                <th>WirKaufens</th>
-              {% endif %}
-              <th>Zustand</th>
+              <th>Plattform-Zustand</th>
             </tr>
           </thead>
-          <tbody>
-            {% for deal in deals %}
+          {% macro deal_row(deal, has_flip, has_buyback, has_score) %}
               <tr class="{{ 'worth-it-row' if deal.worth_it else '' }}"
                   data-worth-it="{{ 'true' if deal.worth_it else 'false' }}">
 
@@ -217,22 +242,25 @@
                 <td><b>{{ deal.price_text }}</b></td>
 
                 {# Score #}
+                {% if has_score %}
                 <td>
-                  <b class="score">{{ '%.0f'|format(deal.deal_score|float) if deal.deal_score else '—' }}</b>
+                  <b class="score">{{ '%.0f'|format(deal.deal_score|float) if deal.deal_score is not none else '–' }}</b>
                 </td>
+                {% endif %}
 
-                {# Eingestellt (relativ) #}
-                <td class="time-cell" data-ts="{{ deal.last_seen }}"
-                    title="{{ deal.last_seen[:16] }}">
-                  {{ deal.last_seen[:16] }}
+                {# Entdeckt (relativ) — first_seen, nicht last_seen: last_seen
+                   ist für alle aktiven Anzeigen identisch (Scan-Zeitpunkt). #}
+                <td class="time-cell" data-ts="{{ deal.first_seen }}"
+                    title="{{ deal.first_seen[:16] }}">
+                  {{ deal.first_seen[:16] }}
                 </td>
 
                 {# eBay Flip-Daten #}
                 {% if has_flip %}
                   {% if deal.ref_median %}
-                    <td>{{ '%.0f'|format(deal.ref_median) }} €</td>
+                    <td>{{ '%.0f'|format(deal.ref_median) if deal.ref_median is not none else '–' }} €</td>
                     <td class="{{ 'profit-pos' if deal.flip_profit and deal.flip_profit > 0 else 'profit-neg' }}">
-                      <b>{{ '%+.0f'|format(deal.flip_profit) }} €</b>
+                      <b>{{ '%+.0f'|format(deal.flip_profit) if deal.flip_profit is not none else '–' }} €</b>
                     </td>
                     <td>{{ '%.0f%%'|format(deal.flip_roi * 100) if deal.flip_roi is not none else '—' }}</td>
                   {% else %}
@@ -246,6 +274,15 @@
                     {% if deal.detected_condition %}
                       <span class="cond-badge">{{ deal.detected_condition }}</span>
                     {% else %}—{% endif %}
+                    {% if deal.ai_risk %}
+                      <span class="risk-badge risk-{{ deal.ai_risk }}"
+                            title="KI-Risiko für Blindkauf: {{ deal.ai_risk }}">
+                        KI: {{ deal.ai_risk }}
+                      </span>
+                    {% endif %}
+                    {% if deal.ai_reason %}
+                      <div class="ai-reason">{{ deal.ai_reason }}</div>
+                    {% endif %}
                   </td>
                   <td>
                     {% if deal.condition_profit is not none %}
@@ -259,46 +296,26 @@
                   </td>
                 {% endif %}
 
-                {# Portal-Preise #}
-                {% if has_buyback and deals[0].clevertronic_prices is not none %}
-                  <td>
-                    {% if deal.clevertronic_prices %}
-                      {% for cond, price in deal.clevertronic_prices.items() %}
-                        <span class="ct-badge" title="{{ cond }}">{{ cond }} {{ price }}€</span>
-                      {% endfor %}
-                    {% else %}—{% endif %}
-                  </td>
-                {% endif %}
-                {% if has_buyback and deals[0].zoxs_prices is not none %}
-                  <td>
-                    {% if deal.zoxs_prices %}
-                      {% for cond, price in deal.zoxs_prices.items() %}
-                        <span class="ct-badge zoxs-badge" title="{{ cond }}">{{ cond }} {{ price }}€</span>
-                      {% endfor %}
-                    {% else %}—{% endif %}
-                  </td>
-                {% endif %}
-                {% if has_buyback and deals[0].wirkaufens_prices is not none %}
-                  <td>
-                    {% if deal.wirkaufens_prices %}
-                      {% for cond, price in deal.wirkaufens_prices.items() %}
-                        <span class="ct-badge wkfs-badge" title="{{ cond }}">{{ cond }} {{ price }}€</span>
-                      {% endfor %}
-                    {% else %}—{% endif %}
-                  </td>
-                {% endif %}
-
                 {# Plattform-Zustand #}
                 <td class="cond-small">{{ deal.condition or '—' }}</td>
 
               </tr>
+          {% endmacro %}
+          <tbody>
+            {% if deals %}
+              {% for deal in deals if deal.worth_it %}
+                {{ deal_row(deal, has_flip, has_buyback, has_score) }}
+              {% endfor %}
+              {% for deal in deals if not deal.worth_it %}
+                {{ deal_row(deal, has_flip, has_buyback, has_score) }}
+              {% endfor %}
             {% else %}
               <tr>
-                <td colspan="20" class="empty-row">
+                <td colspan="{{ col_count }}" class="empty-row">
                   Noch keine Scan-Daten. Oben auf <b>Jetzt scannen</b> klicken.
                 </td>
               </tr>
-            {% endfor %}
+            {% endif %}
           </tbody>
         </table>
       </div>
@@ -357,21 +374,29 @@ fetch('/api/profiles/{{ selected_profile_id }}/trend')
 (function () {
   let lastFinished = null;
 
-  // Convert ISO timestamp to relative German label
+  // Convert ISO timestamp (UTC, "T" separator) to relative German label
   function relTime(iso) {
     if (!iso) return '';
-    const diff = (Date.now() - new Date(iso)) / 1000;
-    if (diff < 60)   return 'gerade eben';
-    if (diff < 3600) return Math.floor(diff / 60) + ' Min. her';
-    if (diff < 86400) return Math.floor(diff / 3600) + ' Std. her';
-    return Math.floor(diff / 86400) + ' Tage her';
+    // The raw value is UTC without timezone suffix — append "Z" before parsing
+    let s = iso.trim();
+    if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) s += 'Z';
+    const d = new Date(s);
+    if (isNaN(d)) return iso;
+    const diff = (Date.now() - d.getTime()) / 1000;
+    if (diff < 60)    return 'gerade eben';
+    if (diff < 3600)  return 'vor ' + Math.floor(diff / 60) + ' Min';
+    if (diff < 86400) return 'vor ' + Math.floor(diff / 3600) + ' Std';
+    const days = Math.floor(diff / 86400);
+    return 'vor ' + days + (days === 1 ? ' Tag' : ' Tagen');
   }
 
-  // Render relative times on all .time-cell elements
+  // Render relative times on all .time-cell elements (absolute value stays in title)
   function updateTimeCells() {
     document.querySelectorAll('.time-cell[data-ts]').forEach(el => {
       const ts = el.dataset.ts;
-      if (ts) el.textContent = relTime(ts);
+      if (!ts) return;
+      if (!el.title) el.title = ts.slice(0, 16).replace('T', ' ');
+      el.textContent = relTime(ts);
     });
   }
 
@@ -406,10 +431,15 @@ fetch('/api/profiles/{{ selected_profile_id }}/trend')
           s.last_result  ? 'Letzter Scan: ' + s.last_result :
           'Noch kein Scan abgeschlossen';
 
-        // Show non-intrusive banner when a new scan finished
+        // New scan finished: auto-reload only if the user hasn't scrolled,
+        // otherwise show a non-intrusive toast
         if (!s.scanning && s.last_finished && s.last_finished !== lastFinished) {
-          if (lastFinished !== null && banner) {
-            banner.style.display = 'flex';
+          if (lastFinished !== null) {
+            if (window.scrollY < 50) {
+              location.reload();
+            } else if (banner) {
+              banner.style.display = 'flex';
+            }
           }
           lastFinished = s.last_finished;
         }

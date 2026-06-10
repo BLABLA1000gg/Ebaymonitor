@@ -35,6 +35,8 @@ _MIGRATIONS = [
     "ALTER TABLE profile_listings ADD COLUMN worth_it INTEGER DEFAULT 0",
     "ALTER TABLE profile_listings ADD COLUMN condition_profit TEXT",
     "ALTER TABLE profile_listings ADD COLUMN condition_roi TEXT",
+    "ALTER TABLE profile_listings ADD COLUMN ai_risk TEXT",
+    "ALTER TABLE profile_listings ADD COLUMN ai_reason TEXT",
 ]
 
 
@@ -172,6 +174,13 @@ class MonitorStore:
         wkfs_json = json.dumps(wirkaufens_prices) if wirkaufens_prices else None
         extras = listing_extras or {}
         with self.connection:
+            # Reset stale verdicts: worth_it must reflect the CURRENT scan
+            # only. Old rows keeping worth_it=1 from previous (less strict)
+            # pipeline versions would show unverified deals as buyable.
+            self.connection.execute(
+                "UPDATE profile_listings SET worth_it=0 WHERE profile_id=?",
+                (profile.id,),
+            )
             self.connection.execute(
                 "INSERT INTO market_snapshots(profile_id,sold_url,raw_sold_count,accepted_sold_count,average_sold_price,median_sold_price,minimum_sold_price,maximum_sold_price,sold_per_month,active_count,sell_through_rate,estimated_days_to_sell,demand,observed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (profile.id,sold_url,metrics.raw_count,metrics.accepted_count,_decimal(metrics.average),_decimal(metrics.median),_decimal(metrics.minimum),_decimal(metrics.maximum),str(metrics.sold_per_month),metrics.active_count,_decimal(metrics.sell_through_rate),_decimal(metrics.estimated_days_to_sell),metrics.demand,now),
@@ -179,19 +188,21 @@ class MonitorStore:
             for item in active:
                 ex = extras.get(item.link, {})
                 self.connection.execute(
-                    "INSERT INTO profile_listings(profile_id,link,deal_score,clevertronic_prices,zoxs_prices,wirkaufens_prices,detected_condition,worth_it,condition_profit,condition_roi,last_seen) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                    "INSERT INTO profile_listings(profile_id,link,deal_score,clevertronic_prices,zoxs_prices,wirkaufens_prices,detected_condition,worth_it,condition_profit,condition_roi,ai_risk,ai_reason,last_seen) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(profile_id,link) DO UPDATE SET "
                     "deal_score=excluded.deal_score,clevertronic_prices=excluded.clevertronic_prices,"
                     "zoxs_prices=excluded.zoxs_prices,wirkaufens_prices=excluded.wirkaufens_prices,"
                     "detected_condition=excluded.detected_condition,worth_it=excluded.worth_it,"
                     "condition_profit=excluded.condition_profit,condition_roi=excluded.condition_roi,"
+                    "ai_risk=excluded.ai_risk,ai_reason=excluded.ai_reason,"
                     "last_seen=excluded.last_seen",
                     (profile.id, item.link, _decimal(deal_score(item.price, metrics.median)),
                      ct_json, zoxs_json, wkfs_json,
                      ex.get("detected_condition"), int(bool(ex.get("worth_it"))),
                      str(ex["condition_profit"]) if ex.get("condition_profit") is not None else None,
                      str(ex["condition_roi"]) if ex.get("condition_roi") is not None else None,
+                     ex.get("ai_risk"), ex.get("ai_reason"),
                      now),
                 )
 
@@ -205,7 +216,8 @@ class MonitorStore:
             trend = self.connection.execute("SELECT * FROM market_snapshots WHERE profile_id=? ORDER BY observed_at ASC LIMIT 180", (selected,)).fetchall()
             raw_deals = self.connection.execute(
                 "SELECT l.*,pl.deal_score,pl.clevertronic_prices,pl.zoxs_prices,pl.wirkaufens_prices,"
-                "pl.detected_condition,pl.worth_it,pl.condition_profit,pl.condition_roi "
+                "pl.detected_condition,pl.worth_it,pl.condition_profit,pl.condition_roi,"
+                "pl.ai_risk,pl.ai_reason "
                 "FROM profile_listings pl JOIN listings l ON l.link=pl.link "
                 "WHERE pl.profile_id=? AND l.active=1 "
                 "ORDER BY pl.worth_it DESC, CAST(pl.deal_score AS REAL) DESC LIMIT 50",

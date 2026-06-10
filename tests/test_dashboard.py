@@ -47,7 +47,7 @@ class ProfileStorageTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 302)
         self.assertIn(b"ThinkPads", client.get("/").data)
-        self.assertIn(b"Scan now", client.get("/").data)
+        self.assertIn(b"Jetzt scannen", client.get("/").data)
         status = client.get("/api/monitor/status")
         self.assertEqual(status.status_code, 200)
         self.assertFalse(status.get_json()["running"])

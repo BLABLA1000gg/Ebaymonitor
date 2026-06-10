@@ -21,6 +21,7 @@ from condition_detect import (
     detect_condition, is_worth_it, COND_LABELS,
     ai_assess_listing_batch, COND_BROKEN, COND_ACCEPTABLE,
     ai_assess_listing_full, _fetch_ka_details, _fetch_vinted_details,
+    trim_caches,
 )
 from monitor import fetch_listings, sold_search_url
 from proxy import ProfileProxyStore, redact_proxy_url, request_proxies
@@ -28,6 +29,40 @@ from settings import SettingsStore
 from storage import MonitorStore
 
 LOGGER = logging.getLogger(__name__)
+
+# Realistic phone storage tiers — anything else is a misparse (model number,
+# battery percentage, etc.) and must not be treated as a storage size.
+_VALID_GB = {16, 32, 64, 128, 256, 512, 1024}
+
+
+def _gb_candidates(text: str) -> list[int]:
+    t = text.lower()
+    found: list[int] = []
+    for m in re.finditer(r'\b(\d)\s*tb\b', t):
+        gb = int(m.group(1)) * 1024
+        if gb in _VALID_GB:
+            found.append(gb)
+    for m in re.finditer(r'\b(\d{2,4})\s*(?:gb|go)\b', t):
+        gb = int(m.group(1))
+        if gb in _VALID_GB:
+            found.append(gb)
+    return found
+
+
+def _extract_listing_gb(text: str, title: str = "") -> int | None:
+    """Extract the storage size in GB from a listing.
+
+    Handles "128GB", "128 GB", "128Go" (FR), "1TB". The title is authoritative
+    when it names a size; description text may mention other variants (trade
+    offers, seller boilerplate), so there the SMALLEST size wins — pricing too
+    low is a missed deal, pricing too high is money lost.
+    """
+    if title:
+        title_sizes = _gb_candidates(title)
+        if title_sizes:
+            return min(title_sizes)
+    sizes = _gb_candidates(text)
+    return min(sizes) if sizes else None
 
 
 def scan_profiles(
@@ -42,14 +77,61 @@ def scan_profiles(
     profiles = store.profiles(enabled_only=True)
     all_active = {}
     successful_profiles = 0
+    trim_caches()  # bound in-memory AI caches in long-running monitor loops
 
     # Vinted description fetch state — shared across ALL profiles to avoid
     # fetching the same URL multiple times (same listing can appear in several
     # profiles, e.g. "iphone 13" and "iphone 13 pro").
-    _vinted_sem = threading.Lock()
-    _vinted_count = [0]   # mutable int shared across closures
-    _VINTED_PAGE_CAP = 40  # max unique Vinted page fetches per full scan
-    _vinted_cache: dict = {}  # url → (imgs, desc) — avoid duplicate fetches
+    #
+    # Vinted rate-limits detail-page fetches to a burst of ~26 requests per IP,
+    # then returns empty pages. Measured behaviour: throttling to ~2.5s per
+    # request sustains a high success rate, and a single retry after a longer
+    # backoff recovers most transient blocks. We therefore serialize all Vinted
+    # fetches, enforce a minimum gap, and retry once before giving up.
+    _vinted_sem = threading.Lock()       # serialize all Vinted detail fetches
+    _vinted_cache: dict = {}             # url → (imgs, desc); avoids re-fetch
+    _vinted_count = [0]                  # total fetch attempts this scan
+    _vinted_last = [0.0]                 # monotonic time of last fetch
+    _VINTED_PAGE_CAP = 120               # hard cap to bound total scan time
+    _VINTED_MIN_GAP = 2.5                # seconds between sequential fetches
+    _VINTED_RETRY_BACKOFF = 6.0          # extra wait before a single retry
+
+    def _vinted_fetch_throttled(url: str):
+        """Fetch a Vinted detail page with serialization, throttling, retry
+        and caching. Returns (imgs, desc) — possibly ([], "") on failure.
+
+        Must be called WITHOUT holding _vinted_sem; it acquires the lock itself.
+        """
+        with _vinted_sem:
+            cached = _vinted_cache.get(url)
+            if cached is not None:
+                return cached
+            if _vinted_count[0] >= _VINTED_PAGE_CAP:
+                return [], ""
+
+            # Enforce a minimum gap since the previous fetch
+            gap = time.monotonic() - _vinted_last[0]
+            if gap < _VINTED_MIN_GAP:
+                time.sleep(_VINTED_MIN_GAP - gap)
+
+            imgs, desc = [], ""
+            try:
+                imgs, desc = _fetch_vinted_details(url)
+            except Exception as e:
+                LOGGER.debug("Vinted fetch error for %s: %s", url[-50:], e)
+            # Retry once after a longer backoff if blocked or errored
+            if not imgs and not desc:
+                time.sleep(_VINTED_RETRY_BACKOFF)
+                try:
+                    imgs, desc = _fetch_vinted_details(url)
+                except Exception as e:
+                    LOGGER.debug("Vinted retry error for %s: %s", url[-50:], e)
+
+            _vinted_last[0] = time.monotonic()
+            _vinted_count[0] += 1
+            if imgs or desc:
+                _vinted_cache[url] = (imgs, desc)
+            return imgs, desc
 
     for profile in profiles:
         try:
@@ -100,9 +182,13 @@ def scan_profiles(
         wirkaufens_prices: dict = {}
 
         # --- New flow: platform checkboxes + DeepSeek spec extraction ---
+        # buyback_by_gb: {storage_gb: {platform: condition→price}}. Each
+        # listing is priced against its OWN storage variant — a 256GB phone
+        # must never be evaluated with 128GB buyback prices.
+        buyback_by_gb: dict[int, dict[str, dict]] = {}
         if profile.buyback_platforms:
             try:
-                _fetch_buyback_dynamic(
+                buyback_by_gb = _fetch_buyback_dynamic(
                     profile, active, settings,
                     ct_prices, zoxs_prices, wirkaufens_prices,
                 )
@@ -111,6 +197,10 @@ def scan_profiles(
 
         # --- Legacy flow: manual URLs ---
         elif profile.clevertronic_url or profile.zoxs_url or profile.wirkaufens_url:
+            LOGGER.warning(
+                "%s: Legacy-Ankauf-URLs aktiv — KEINE Speichergrößen-Prüfung "
+                "pro Listing. Für Blindkäufe Plattform-Checkboxen verwenden.",
+                profile.name)
             try:
                 with BuybackScraper() as bs:
                     if profile.clevertronic_url:
@@ -258,6 +348,15 @@ def scan_profiles(
                                     profile.name, item.title[:60])
                         return item.link, _skip
 
+                    # eBay descriptions live in an iframe and are never fetched,
+                    # so the only text-level verification is eBay's own condition
+                    # field. Without it the listing cannot be verified — skip.
+                    is_ebay = item.link and "ebay." in item.link
+                    if is_ebay and not item.condition:
+                        LOGGER.info("%s: SKIP (eBay ohne Zustandsangabe) — %s",
+                                    profile.name, item.title[:60])
+                        return item.link, _skip
+
                     # ── Guard 2: regex hard-block (title + description so far) ─
                     raw_cond = detect_condition(item.title, description=item_desc)
                     if raw_cond == COND_BROKEN:
@@ -295,8 +394,9 @@ def scan_profiles(
                                 )
                                 if batch:
                                     assess = batch[0]
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                LOGGER.debug("%s: text-only assessment failed for %s: %s",
+                                             profile.name, item.title[:40], e)
 
                     # If BOTH vision AND text-only failed → skip listing
                     if api_key and provider == "nvidia" and assess is None:
@@ -313,30 +413,14 @@ def scan_profiles(
                     # Fetches the real description for regex verification.
                     # Serialized with a lock + cache to stay under Vinted's rate limit.
                     if is_vinted and assess and assess.get("functional"):
-                        desc_fetched_ok = False
-                        with _vinted_sem:
-                            if item.link in _vinted_cache:
-                                cached_imgs, cached_desc = _vinted_cache[item.link]
-                                if cached_imgs or cached_desc:
-                                    if cached_desc:
-                                        item_desc = cached_desc
-                                    desc_fetched_ok = True
-                            elif _vinted_count[0] < _VINTED_PAGE_CAP:
-                                try:
-                                    time.sleep(1)
-                                    fetched_imgs, fetched_desc = _fetch_vinted_details(item.link)
-                                    if fetched_imgs or fetched_desc:
-                                        _vinted_cache[item.link] = (fetched_imgs, fetched_desc)
-                                        if fetched_desc:
-                                            item_desc = fetched_desc
-                                        desc_fetched_ok = True
-                                    _vinted_count[0] += 1
-                                except Exception:
-                                    pass
-
-                        if not desc_fetched_ok:
-                            # Could not verify description — skip for safety.
-                            # Vision alone cannot detect "won't turn on" stated only in text.
+                        fetched_imgs, fetched_desc = _vinted_fetch_throttled(item.link)
+                        if fetched_desc:
+                            item_desc = fetched_desc
+                        else:
+                            # The DESCRIPTION must be verified — photos alone
+                            # don't count. "Won't turn on" stated only in text
+                            # is invisible to vision; a page that returned
+                            # images but no description text is unverified.
                             LOGGER.info("%s: SKIP (Vinted Beschreibung nicht verifizierbar) — %s",
                                         profile.name, item.title[:60])
                             return item.link, _skip
@@ -357,27 +441,61 @@ def scan_profiles(
                                     profile.name, item.title[:60])
                         return item.link, _skip
 
-                    # ── Condition score priority ─────────────────────────────
-                    # Platform field > AI (if more pessimistic) > regex
-                    if item.condition:
+                    # ── Guard 5a: AI blind-buy risk gate ─────────────────────
+                    # The vision model rates how safe a SIGHT-UNSEEN purchase is.
+                    # "hoch" = red flags (possible hidden damage, contradictions,
+                    # suspiciously cheap). For real-money blind buying we skip it.
+                    if assess.get("risk") == "hoch":
+                        LOGGER.info("%s: SKIP (KI-Risiko hoch: %s) — %s",
+                                    profile.name, assess.get("reason", "")[:50],
+                                    item.title[:50])
+                        return item.link, _skip
+
+                    # ── Guard 5b: price against the listing's OWN storage ────
+                    # Buyback tables were fetched per storage variant. Pick the
+                    # table matching this listing's size; no table for its size
+                    # (or size unknown) → skip. Pricing a 128GB phone with
+                    # 256GB buyback prices would inflate profit by €20-80.
+                    item_ct, item_zoxs, item_wkfs = ct_prices, zoxs_prices, wirkaufens_prices
+                    if buyback_by_gb:
+                        listing_gb = _extract_listing_gb(item_desc, title=item.title)
+                        gb_prices = buyback_by_gb.get(listing_gb) if listing_gb else None
+                        if not gb_prices:
+                            LOGGER.info(
+                                "%s: SKIP (kein Ankaufspreis für Speicher %s) — %s",
+                                profile.name,
+                                f"{listing_gb}GB" if listing_gb else "unbekannt",
+                                item.title[:60])
+                            return item.link, _skip
+                        item_ct = gb_prices.get("clevertronic", {})
+                        item_zoxs = gb_prices.get("zoxs", {})
+                        item_wkfs = gb_prices.get("wirkaufens", {})
+
+                    # ── Displayed condition: AI is the source of truth ───────
+                    # Pricing uses fixed conservative tiers regardless of this
+                    # score (see matched_buyback_price), so the displayed Zustand
+                    # is the AI's HONEST read of what the buyer will receive.
+                    # AI > platform field (sellers inflate) > regex.
+                    ai_cond = assess.get("condition")
+                    if ai_cond is not None:
+                        cond_score = ai_cond
+                        # If the platform field is even more pessimistic, trust it
+                        if item.condition:
+                            plat = detect_condition(item.title, platform_condition=item.condition)
+                            cond_score = min(cond_score, plat)
+                    elif item.condition:
                         cond_score = detect_condition(item.title, platform_condition=item.condition)
-                        ai_cond = assess.get("condition")
-                        if ai_cond is not None and ai_cond < cond_score:
-                            LOGGER.info("%s: AI overrides platform %s→%s — %s",
-                                        profile.name, COND_LABELS.get(cond_score),
-                                        COND_LABELS.get(ai_cond), item.title[:50])
-                            cond_score = ai_cond
-                    elif assess.get("condition") is not None:
-                        cond_score = assess["condition"]
                     else:
-                        cond_score = raw_cond
+                        # No AI, no platform field — regex only. Grade
+                        # conservatively (cap at "Gebraucht").
+                        cond_score = min(raw_cond, 1)
 
                     worth, profit, roi = is_worth_it(
                         listing_price=item.price or Decimal("0"),
                         condition_score=cond_score,
-                        zoxs_prices=zoxs_prices or None,
-                        wkfs_prices=wirkaufens_prices or None,
-                        clevertronic_prices=ct_prices or None,
+                        zoxs_prices=item_zoxs or None,
+                        wkfs_prices=item_wkfs or None,
+                        clevertronic_prices=item_ct or None,
                         shipping_cost=ship,
                         fee_rate=fee,
                         title=item.title,
@@ -400,6 +518,8 @@ def scan_profiles(
                         "worth_it": worth,
                         "condition_profit": float(profit) if profit is not None else None,
                         "condition_roi": roi,
+                        "ai_risk": assess.get("risk"),
+                        "ai_reason": assess.get("reason"),
                     }
                 except Exception as e:
                     LOGGER.warning("%s: _assess_item error for %s: %s",
@@ -433,7 +553,11 @@ def scan_profiles(
             profile.name, len(active), metrics.accepted_count, metrics.raw_count,
             metrics.sold_per_month, metrics.demand, redact_proxy_url(proxy_url) or "direct",
         )
-    events = store.record_scan(list(all_active.values())) if successful_profiles else []
+    # Only record when at least one profile produced listings — recording an
+    # empty scan would mark EVERY stored listing inactive and wipe the
+    # dashboard after a transient network failure.
+    events = (store.record_scan(list(all_active.values()))
+              if successful_profiles and all_active else [])
     return len(profiles), len(events)
 
 
@@ -445,7 +569,7 @@ def _no_auctions(url: str) -> str:
     return url
 
 
-def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wirkaufens_prices):
+def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wirkaufens_prices) -> int | None:
     """
     Dynamic buyback price fetch using platform checkboxes + DeepSeek spec extraction.
 
@@ -455,6 +579,13 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
     3. Find the most common storage variant across listings
     4. Search each selected platform with <keyword> + <GB>
     5. Pick the best matching product and scrape prices
+
+    Returns {gb: {"clevertronic": {...}, "zoxs": {...}, "wirkaufens": {...}}}
+    with full condition→price tables per storage size, so every listing can be
+    priced against ITS OWN variant. Empty dict when nothing could be fetched.
+
+    The dominant storage size's prices are additionally copied into the passed
+    ct_prices/zoxs_prices/wirkaufens_prices dicts (profile-level display).
     """
     from buyback_search import search_zoxs, search_wirkaufens, search_clevertronic
     from deepseek_extract import extract_specs_batch, build_search_query
@@ -462,7 +593,7 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
     base_keyword = profile.ebay_search_keyword or profile.include_keywords
     if not base_keyword:
         LOGGER.warning("%s: No keyword found for dynamic buyback search", profile.name)
-        return
+        return {}
 
     provider = settings.ai_provider if settings else "none"
     if provider == "nvidia":
@@ -483,15 +614,24 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
             gb = specs["storage_gb"]
             gb_votes[gb] = gb_votes.get(gb, 0) + 1
 
-    dominant_gb = max(gb_votes, key=gb_votes.get) if gb_votes else None
-    refined_query = build_search_query(base_keyword, {"storage_gb": dominant_gb})
+    if not gb_votes:
+        LOGGER.warning("%s: No storage size detectable in any listing — "
+                       "skipping buyback fetch (cannot price safely)", profile.name)
+        return {}
 
+    # Fetch prices for the most common storage variants (up to 3) so listings
+    # of every relevant size get matched against their own buyback product.
+    target_gbs = sorted(gb_votes, key=gb_votes.get, reverse=True)[:3]
+    dominant_gb = target_gbs[0]
+
+    # One keyword search per platform (without GB — results contain all
+    # variants); per-GB product selection happens via _best_match below.
+    refined_query = build_search_query(base_keyword, {"storage_gb": None})
     LOGGER.info(
-        "%s: Dynamic buyback search — keyword=%r dominant_gb=%s query=%r platforms=%s",
-        profile.name, base_keyword, dominant_gb, refined_query, profile.buyback_platforms,
+        "%s: Dynamic buyback search — keyword=%r target_gbs=%s query=%r platforms=%s",
+        profile.name, base_keyword, target_gbs, refined_query, profile.buyback_platforms,
     )
 
-    # Search all selected platforms in parallel
     platforms = profile.buyback_platforms
     search_fns = {
         "zoxs": search_zoxs,
@@ -511,55 +651,90 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
                 LOGGER.warning("%s: %s search failed: %s", profile.name, platform, err)
                 platform_results[platform] = []
 
-    # For each platform pick best matching product and scrape prices.
+    # Scrape the full condition→price table per (platform, storage size).
     # We always scrape with functional=True / battery_ok=True to get the FULL
-    # condition price table. The per-listing assessment then picks the right tier
-    # (e.g. a non-functional listing uses COND_BROKEN which maps to the lowest price).
+    # table; the per-listing assessment picks the right condition tier.
+    scrape_fns = {
+        "clevertronic": lambda bs, url: bs.clevertronic(url, functional=True, battery_ok=True),
+        "zoxs": lambda bs, url: bs.zoxs(url, functional=True, battery_ok=True,
+                                        has_box=False, has_cable=False),
+        "wirkaufens": lambda bs, url: bs.wirkaufens(url, functional=True, battery_ok=True),
+    }
+    by_gb: dict[int, dict[str, dict]] = {}
     with BuybackScraper() as bs:
-        if "clevertronic" in platform_results and platform_results["clevertronic"]:
-            best = _best_match(platform_results["clevertronic"], dominant_gb)
-            if best:
+        for gb in target_gbs:
+            gb_prices: dict[str, dict] = {}
+            for platform in platforms:
+                products = platform_results.get(platform) or []
+                best = _best_match(products, gb, base_keyword)
+                if not best:
+                    continue
                 try:
-                    prices = bs.clevertronic(best["url"], functional=True, battery_ok=True)
-                    ct_prices.update({k: str(v) for k, v in prices.items()})
-                    LOGGER.info("%s: Clevertronic [%s]: %s", profile.name, best["name"], ct_prices)
+                    prices = scrape_fns[platform](bs, best["url"])
+                    if prices:
+                        gb_prices[platform] = {k: str(v) for k, v in prices.items()}
+                        LOGGER.info("%s: %s %sGB [%s]: %s", profile.name,
+                                    platform, gb, best["name"], gb_prices[platform])
                 except Exception as err:
-                    LOGGER.warning("%s: Clevertronic scrape failed: %s", profile.name, err)
+                    LOGGER.warning("%s: %s scrape failed (%sGB): %s",
+                                   profile.name, platform, gb, err)
+            if gb_prices:
+                by_gb[gb] = gb_prices
 
-        if "zoxs" in platform_results and platform_results["zoxs"]:
-            best = _best_match(platform_results["zoxs"], dominant_gb)
-            if best:
-                try:
-                    prices = bs.zoxs(best["url"], functional=True, battery_ok=True,
-                                     has_box=False, has_cable=False)
-                    zoxs_prices.update({k: str(v) for k, v in prices.items()})
-                    LOGGER.info("%s: ZOXS [%s]: %s", profile.name, best["name"], zoxs_prices)
-                except Exception as err:
-                    LOGGER.warning("%s: ZOXS scrape failed: %s", profile.name, err)
+    # Profile-level price display uses the dominant variant
+    dom = by_gb.get(dominant_gb, {})
+    ct_prices.update(dom.get("clevertronic", {}))
+    zoxs_prices.update(dom.get("zoxs", {}))
+    wirkaufens_prices.update(dom.get("wirkaufens", {}))
 
-        if "wirkaufens" in platform_results and platform_results["wirkaufens"]:
-            best = _best_match(platform_results["wirkaufens"], dominant_gb)
-            if best:
-                try:
-                    prices = bs.wirkaufens(best["url"], functional=True, battery_ok=True)
-                    wirkaufens_prices.update({k: str(v) for k, v in prices.items()})
-                    LOGGER.info("%s: WirKaufens [%s]: %s", profile.name, best["name"], wirkaufens_prices)
-                except Exception as err:
-                    LOGGER.warning("%s: WirKaufens scrape failed: %s", profile.name, err)
+    return by_gb
 
 
-def _best_match(products: list[dict], target_gb: int | None) -> dict | None:
-    """Pick the product whose name best matches the target storage size."""
-    if not products:
+# Model modifiers that change the device (and its buyback price) entirely.
+# A search for "iPhone 14" also returns "14 Pro"/"14 Plus" products — matching
+# the wrong variant prices every listing against the wrong device ("14 Pro"
+# pays ~€140 more than "14"; the inflated payout would fake-profit every deal).
+_MODEL_MODS = ("pro", "max", "mini", "plus", "ultra", "se")
+
+
+def _best_match(products: list[dict], target_gb: int | None,
+                base_keyword: str = "") -> dict | None:
+    """Pick the product matching the target storage size AND the model.
+
+    Returns None when no verified match exists. Guessing wrong (other storage
+    tier or "Pro Max" instead of "Pro") would price every listing against the
+    wrong buyback product, so no match means no prices and therefore no
+    WORTH IT signal — the safe default.
+    """
+    if not products or not target_gb:
         return None
-    if not target_gb:
-        return products[0]
-    gb_str = str(target_gb)
-    # Prefer exact GB match in name
+    if target_gb >= 1024:
+        gb_pattern = rf'\b{target_gb // 1024}\s*tb\b'
+    else:
+        # "128" must be followed by GB/GO so target 128 can't match "1280"
+        # or a model number.
+        gb_pattern = rf'\b{target_gb}\s*(?:gb|go)\b'
+
+    kw = base_keyword.lower()
+    kw_tokens = re.findall(r'\b(\d+|pro|max|mini|plus|ultra|se|xs|xr)\b', kw)
+
+    def model_ok(name: str) -> bool:
+        nl = name.lower()
+        # All keyword model tokens must appear in the product name
+        if not all(re.search(rf'\b{re.escape(t)}\b', nl) for t in kw_tokens):
+            return False
+        # Product must not introduce a variant modifier the keyword lacks
+        # (e.g. product "13 Pro Max" for keyword "13 pro")
+        for mod in _MODEL_MODS:
+            if re.search(rf'\b{mod}\b', nl) and mod not in kw_tokens:
+                return False
+        return True
+
     for p in products:
-        if gb_str in p.get("name", ""):
+        name = p.get("name", "")
+        if re.search(gb_pattern, name, re.IGNORECASE) and model_ok(name):
             return p
-    return products[0]
+    return None
 
 
 def run(database_path: Path, once: bool) -> None:

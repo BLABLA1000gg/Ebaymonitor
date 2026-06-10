@@ -198,6 +198,26 @@ def _llm_single(title: str, description: str, api_key: str, provider: str) -> di
     return _call_llm([{"role": "user", "content": prompt}], api_key, provider, max_tokens=60)
 
 
+def _safe_storage_gb(value) -> int | None:
+    """Parse a storage size from arbitrary LLM output.
+
+    The model sometimes returns garbage (e.g. an Apple model number like
+    'A2407', a string '128GB', or None). Extract only valid GB values and
+    accept only realistic phone storage sizes.
+    """
+    if value is None:
+        return None
+    if isinstance(value, int):
+        gb = value
+    else:
+        m = re.search(r"\d+", str(value))
+        if not m:
+            return None
+        gb = int(m.group())
+    # Only accept realistic phone storage tiers
+    return gb if gb in {16, 32, 64, 128, 256, 512, 1024} else None
+
+
 def _llm_batch(titles: list[str], api_key: str, provider: str) -> list[dict | None]:
     if not titles:
         return []
@@ -218,7 +238,7 @@ def _llm_batch(titles: list[str], api_key: str, provider: str) -> list[dict | No
         if isinstance(item, dict):
             results.append({
                 "model": item.get("model") or None,
-                "storage_gb": int(item["storage_gb"]) if item.get("storage_gb") else None,
+                "storage_gb": _safe_storage_gb(item.get("storage_gb")),
                 "color": item.get("color") or None,
             })
         else:
