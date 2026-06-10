@@ -5,12 +5,14 @@ An automated monitor for eBay, Kleinanzeigen and Vinted that identifies profitab
 ## What it does
 
 1. **Monitors** eBay, Kleinanzeigen and Vinted listings based on your search profiles
-2. **Detects condition** from listing title + description using AI (functional state, battery health, accessories)
-3. **Queries buyback portals** (ZOXS, WirKaufens, Clevertronic) for current Ankaufpreise
-4. **Dynamically answers** condition wizard questions on each buyback portal based on the AI assessment
-5. **Calculates ROI** after eBay fees and shipping; flags listings worth buying
-6. **Optionally checks listing images** with a vision model when ROI looks promising
-7. **Shows everything** in a local web dashboard with price history, charts and deal scores
+2. **Detects condition** from listing title, description AND a photo using an AI vision model (functional state, battery health, accessories, defects)
+3. **Queries buyback portals** (ZOXS, WirKaufens, Clevertronic) for current Ankaufpreise — per storage variant
+4. **Rates blind-buy risk** with the AI (niedrig / mittel / hoch) and skips high-risk listings
+5. **Calculates a floor profit** using fixed conservative buyback tiers, after eBay fees and shipping
+6. **Flags WORTH IT** only when the listing survives every safety guard and clears the profit threshold
+7. **Shows everything** in a local German web dashboard with price history, charts, deal scores and the AI's reasoning per deal
+
+The pipeline is built for **blind buying** — i.e. purchasing flagged listings sight-unseen with real money. Every step errs on the side of skipping rather than risking a bad purchase.
 
 ## Supported platforms
 
@@ -22,10 +24,12 @@ An automated monitor for eBay, Kleinanzeigen and Vinted that identifies profitab
 
 ## AI features
 
-- **Batch condition assessment** — one API call per scan evaluates all listings for condition score (0–5), functional state, battery health and accessories (box, cable)
-- **Portal question automation** — Clevertronic / ZOXS / WirKaufens condition wizards are answered automatically based on the per-listing assessment
-- **Vision check** — if ROI is promising, up to 6 listing images are fetched and rated by a vision model; condition score is downgraded if photos look worse than the description claims
-- **Spec extraction** — storage capacity is inferred from listing titles to pick the correct buyback product
+- **Vision assessment** — each promising listing is rated from its photo + title + description in one call: condition score (0–5), functional state, battery health, box/cable, plus a blind-buy **risk level** and a short German **reason**
+- **Risk gate** — listings the AI rates high-risk (`hoch` — possible hidden damage, contradictions, suspiciously cheap) are skipped automatically; the risk and reason are shown in the dashboard for every deal
+- **Multilingual defect detection** — broken-device keywords in German, Dutch, French and Italian are hard-blocked from title and the fetched description
+- **Portal question automation** — Clevertronic / ZOXS / WirKaufens condition wizards are answered automatically by the scraper
+- **Spec extraction** — storage capacity is inferred from each listing (title authoritative, Vinted attribute fallback) so it is priced against its own variant
+- **Conservative-by-design** — when the AI is uncertain or unavailable, grading falls to the lowest realistic tier rather than an optimistic guess
 
 ### AI providers
 
@@ -82,7 +86,35 @@ Profit = Buyback price − Listing price − Shipping − (Listing price × eBay
 ROI    = Profit / Listing price
 ```
 
-A listing is flagged as **WORTH IT** when profit > 0 and ROI exceeds the configured threshold. The correct buyback price tier is selected based on the AI-assessed condition of each individual listing.
+A listing is flagged as **WORTH IT** when profit ≥ €15 and ROI ≥ 15 % (defaults).
+
+### Fixed conservative buyback tiers
+
+The buyback price is **always** taken from a fixed conservative condition tier, regardless of the AI-detected condition — because portals routinely downgrade devices on arrival:
+
+| Portal | Tier always used |
+|---|---|
+| Clevertronic | Gebraucht |
+| ZOXS | Gut |
+| WirKaufens | In Ordnung |
+
+This makes the calculated profit a **floor**, not an optimistic estimate. The AI condition is still used to *filter* (broken / non-functional / high-risk listings are skipped), never to pick a higher payout tier. Broken devices map to no price at all (portals reject them).
+
+### Per-storage-variant pricing
+
+Buyback prices are fetched for the most common storage sizes in each profile, and every listing is priced against **its own** size. A 128 GB phone is never valued with 256 GB prices; a listing whose size can't be verified is skipped.
+
+## Blind-buy safety guards
+
+Listings pass through a chain of guards; failing any one skips the listing:
+
+- Price floor (€20), exact model-token match (incl. mini/SE/Pro variants), accessory / repair-shop / multi-model blocklist
+- Multilingual broken-keyword regex on title and on the **fetched** description
+- Kleinanzeigen: full description is mandatory (skipped if it can't be fetched)
+- eBay: requires the platform condition field (descriptions live in an iframe and aren't fetched); "Für Ersatzteile oder defekt" is treated as broken
+- Vinted: description text is mandatory (photos alone don't count); fetches are throttled to respect rate limits
+- AI risk `hoch` → skip; condition 0 / not functional → skip
+- Storage size must match an available buyback product
 
 ## Configuration
 
@@ -134,7 +166,11 @@ Exports: `listings.csv`, `price_history.csv`, `sold_statistics.csv`.
 
 ## Limitations
 
-- eBay may hide final Best Offer amounts.
-- Kleinanzeigen and Vinted have no public sold-results search — analytics are eBay-only.
-- Demand estimates depend on the visible sold-result window.
+- eBay descriptions live in an iframe and are not fetched — eBay listings without a platform condition field are skipped.
+- IMEI / iCloud-lock status cannot be determined from a listing — a residual risk for any blind purchase.
+- The legacy manual-buyback-URL flow has no per-storage guard; use the platform-checkbox flow for blind buying.
+- Vinted rate-limits detail-page fetches per IP (~26 before throttling); a residential proxy increases throughput.
+- Kleinanzeigen and Vinted have no public sold-results search — sold analytics are eBay-only.
 - Proxy quality and legality are the operator's responsibility.
+
+> **macOS / Apple Silicon:** never wrap the scanner in the `timeout` command — the Homebrew `timeout` binary is x86-64 and forces Python under Rosetta, which breaks the `curl_cffi` native backend and makes all fetches return empty.
