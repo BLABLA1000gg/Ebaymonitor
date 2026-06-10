@@ -17,7 +17,7 @@
 
 body {
   margin: 0;
-  background: radial-gradient(circle at 85% 0, #18253a 0, transparent 32%), var(--bg);
+  background: var(--bg);
   color: var(--text);
   font: 15px Inter, ui-sans-serif, system-ui, sans-serif;
 }
@@ -207,15 +207,14 @@ main {
 .empty,
 .form,
 .danger-zone {
-  background: linear-gradient(145deg, #151e2c, #101722);
+  background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 12px;
   padding: 19px;
 }
 
 .metrics article.metric-highlight {
-  border-color: var(--green);
-  background: linear-gradient(145deg, #0d2b1f, #091a14);
+  border-color: #2f5f48;
 }
 
 .metrics span {
@@ -228,40 +227,37 @@ main {
 .metrics strong { font-size: 20px; }
 
 .metrics article.metric-highlight strong {
-  font-size: 30px;
+  font-size: 26px;
   color: var(--green);
-  text-shadow: 0 0 18px #4ade8033;
 }
 
 /* ── Deal-Übersicht (Hero) ───────────────────────────────────────── */
 .deal-hero {
-  min-height: 100px;
   display: flex;
   align-items: center;
-  padding: 0 26px;
+  padding: 18px 22px;
   margin-bottom: 16px;
   border: 1px solid var(--line);
-  border-radius: 14px;
-  background: linear-gradient(145deg, #151e2c, #101722);
+  border-radius: 12px;
+  background: var(--panel);
 }
 
 .deal-hero.has-deals {
-  border-color: var(--green);
-  background: linear-gradient(145deg, #0d2b1f, #091a14);
+  border-left: 3px solid var(--green);
 }
 
-.hero-line { font-size: 20px; }
-.hero-line strong { font-weight: 800; }
+.hero-line { font-size: 18px; }
+.hero-line strong { font-weight: 700; }
 .hero-profit { color: var(--green); }
-.hero-sep { color: var(--muted); margin: 0 10px; }
-.hero-calm { color: var(--muted); font-size: 16px; }
+.hero-sep { color: var(--line); margin: 0 12px; }
+.hero-calm { color: var(--muted); font-size: 15px; }
 
 /* ── Markt-Kontext (eingeklappt) ─────────────────────────────────── */
 .market-context {
   margin-top: 18px;
   border: 1px solid var(--line);
-  border-radius: 14px;
-  background: linear-gradient(145deg, #151e2c, #101722);
+  border-radius: 12px;
+  background: var(--panel);
   padding: 4px 18px;
 }
 
@@ -345,10 +341,11 @@ th {
   white-space: nowrap;
 }
 
-/* Sortierbare Spaltenköpfe */
+/* Sortierbare Spaltenköpfe — sticky relativ zum .table-wrap Scroll-Container,
+   daher top:0 (nicht 96px, sonst rutscht der Kopf in die erste Zeile). */
 thead th {
   position: sticky;
-  top: 96px;
+  top: 0;
   background: var(--panel);
   z-index: 5;
 }
@@ -358,18 +355,17 @@ th.sortable:hover { color: var(--text); }
 th.sort-asc::after  { content: ' ▲'; color: var(--accent); font-size: 9px; }
 th.sort-desc::after { content: ' ▼'; color: var(--accent); font-size: 9px; }
 
-/* ── Worth-It Zeilen (prominente Hervorhebung) ───────────────────── */
+/* ── Worth-It Zeilen (dezente Hervorhebung) ──────────────────────── */
 .worth-it-row > td {
-  background: #0d3522;
-  box-shadow: inset 0 0 14px #4ade8014;
+  background: rgba(74, 222, 128, .05);
 }
 
 .worth-it-row > td:first-child {
-  border-left: 5px solid var(--green);
+  border-left: 3px solid var(--green);
   padding-left: 14px;
 }
 
-.worth-it-row:hover > td { background: #114229; }
+.worth-it-row:hover > td { background: rgba(74, 222, 128, .09); }
 
 /* Geprüfte Zeilen (lokal markiert) */
 .seen-row { opacity: .45; }
@@ -389,16 +385,24 @@ th.sort-desc::after { content: ' ▼'; color: var(--accent); font-size: 9px; }
 
 /* Dominante Profit-Zelle */
 .profit-cell {
-  font-size: 20px;
-  font-weight: 900;
+  font-size: 18px;
+  font-weight: 700;
 }
 .profit-cell.profit-pos { color: var(--green); }
 .profit-cell.profit-neg { color: var(--red); }
 
 .no-badge { opacity: .2; }
 
-/* ── Deal-Badge ──────────────────────────────────────────────────── */
-.worth-badge { font-size: 16px; }
+/* ── Deal-Badge (kleiner grüner Punkt statt Emoji) ───────────────── */
+.worth-badge {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  vertical-align: middle;
+}
+.hero-line .worth-badge { margin-right: 6px; }
 
 /* ── Listing-Link ────────────────────────────────────────────────── */
 .listing-link {

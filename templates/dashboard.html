@@ -113,7 +113,8 @@
     <section class="deal-hero {% if ds.count and ds.count > 0 %}has-deals{% endif %}">
       {% if ds.count and ds.count > 0 %}
         <span class="hero-line">
-          🟢 <strong>{{ ds.count }}</strong> lohnenswerte{{ 'r' if ds.count == 1 else '' }} Deal{{ '' if ds.count == 1 else 's' }}
+          <span class="worth-badge" aria-hidden="true"></span>
+          <strong>{{ ds.count }}</strong> lohnenswerte{{ 'r' if ds.count == 1 else '' }} Deal{{ '' if ds.count == 1 else 's' }}
           <span class="hero-sep">·</span>
           <strong class="hero-profit">+{{ '%.0f'|format((ds.profit or 0)|float) }} €</strong> Profit
           <span class="hero-sep">·</span>
@@ -129,7 +130,7 @@
       <div class="panel-title">
         <div>
           <h3>Aktuelle Deals</h3>
-          <p>{% if has_score %}Score 50 = eBay-Median &nbsp;·&nbsp; {% endif %}✅ = Lohnt sich zum Kauf</p>
+          <p>{% if has_score %}Score 50 = eBay-Median &nbsp;·&nbsp; {% endif %}Grüner Punkt = lohnt sich zum Kauf</p>
         </div>
         <label class="filter-toggle">
           <input type="checkbox" id="filter-worth-it" checked> Nur lohnenswerte anzeigen
@@ -178,7 +179,7 @@
                 {# Deal-Badge #}
                 <td>
                   {% if deal.worth_it %}
-                    <span class="worth-badge" title="Lohnt sich — Arbitrage-Gewinn nach Gebühren &amp; Versand">✅</span>
+                    <span class="worth-badge" title="Lohnt sich — Arbitrage-Gewinn nach Gebühren &amp; Versand"></span>
                   {% else %}
                     <span class="no-badge" aria-hidden="true">—</span>
                   {% endif %}
