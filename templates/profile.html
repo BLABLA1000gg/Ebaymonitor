@@ -1,9 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="de">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Search profile</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📱</text></svg>">
+  <title>Suchprofil — EbayMonitor</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <style>
     .mp-card {
@@ -95,7 +96,7 @@
         <span class="dot"></span>
         <div>
           <div style="font-weight:700;font-size:13px">Vinted</div>
-          <div style="font-size:11px;color:var(--muted)">Mode &amp; Secondhand</div>
+          <div style="font-size:11px;color:var(--muted)">Secondhand-Marktplatz</div>
         </div>
       </label>
     </div>
@@ -236,8 +237,9 @@
 </form>
 
 {% if profile %}
-<form class="danger-zone" action="{{ url_for('delete_profile', profile_id=profile.id) }}" method="post">
-  <button class="danger" type="submit">Delete profile</button>
+<form class="danger-zone" action="{{ url_for('delete_profile', profile_id=profile.id) }}" method="post"
+      onsubmit="return confirm('Profil und alle Scan-Daten löschen? Dieser Vorgang kann nicht rückgängig gemacht werden.')">
+  <button class="danger" type="submit">Profil löschen</button>
 </form>
 {% endif %}
 </main>

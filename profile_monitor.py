@@ -17,6 +17,11 @@ from analytics import market_metrics
 from browser_fetch import BrowserFetcher
 from buyback import BuybackScraper
 from marketplaces import EBAY, marketplace_for_url
+from condition_detect import (
+    detect_condition, is_worth_it, COND_LABELS,
+    ai_assess_listing_batch, COND_BROKEN, COND_ACCEPTABLE,
+    ai_assess_listing_full, _fetch_ka_details, _fetch_vinted_details,
+)
 from monitor import fetch_listings, sold_search_url
 from proxy import ProfileProxyStore, redact_proxy_url, request_proxies
 from settings import SettingsStore
@@ -127,11 +132,6 @@ def scan_profiles(
         listing_extras = {}
         has_buyback = ct_prices or zoxs_prices or wirkaufens_prices
         if has_buyback:
-            from condition_detect import (
-                detect_condition, is_worth_it, COND_LABELS,
-                ai_assess_listing_batch, COND_BROKEN,
-                ai_assess_listing_full, _fetch_ka_details, _fetch_vinted_details,
-            )
             provider = settings.ai_provider if settings else "none"
             api_key = (settings.nvidia_api_key if provider == "nvidia"
                        else settings.deepseek_api_key if provider == "deepseek"
@@ -243,8 +243,20 @@ def scan_profiles(
                                 if fetched_desc:
                                     item_desc = fetched_desc
                                 fetch_ok = True
-                        except Exception:
-                            pass
+                            else:
+                                LOGGER.debug("%s: KA fetch returned empty for %s",
+                                             profile.name, item.title[:50])
+                        except Exception as e:
+                            LOGGER.debug("%s: KA fetch error for %s: %s",
+                                         profile.name, item.title[:50], e)
+
+                    # KA listings require a verified description before AI assessment.
+                    # KA has no bot detection issue — an empty fetch means a transient
+                    # network error. Skip rather than risk buying without verification.
+                    if is_ka and not fetch_ok:
+                        LOGGER.info("%s: SKIP (KA Beschreibung nicht abrufbar) — %s",
+                                    profile.name, item.title[:60])
+                        return item.link, _skip
 
                     # ── Guard 2: regex hard-block (title + description so far) ─
                     raw_cond = detect_condition(item.title, description=item_desc)
@@ -311,7 +323,7 @@ def scan_profiles(
                                     desc_fetched_ok = True
                             elif _vinted_count[0] < _VINTED_PAGE_CAP:
                                 try:
-                                    import time as _time; _time.sleep(1)
+                                    time.sleep(1)
                                     fetched_imgs, fetched_desc = _fetch_vinted_details(item.link)
                                     if fetched_imgs or fetched_desc:
                                         _vinted_cache[item.link] = (fetched_imgs, fetched_desc)

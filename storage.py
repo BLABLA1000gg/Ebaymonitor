@@ -137,10 +137,16 @@ class MonitorStore:
                     self.connection.execute("INSERT INTO price_history(link,price,price_text,currency,observed_at) VALUES(?,?,?,?,?)", (item.link,_decimal(item.price),item.price_text,item.currency,now))
                 events.append(ListingEvent(kind, item, previous))
             if seen:
+                # marks is built from '?,?,?' — no user data interpolated
                 marks = ",".join("?" for _ in seen)
-                self.connection.execute(f"UPDATE listings SET active=0 WHERE link NOT IN ({marks})", tuple(seen))
-            else:
-                self.connection.execute("UPDATE listings SET active=0")
+                self.connection.execute(
+                    f"UPDATE listings SET active=0 WHERE link NOT IN ({marks})",
+                    tuple(seen),
+                )
+            # If seen is empty we deliberately do NOT mark everything inactive.
+            # An empty result most likely means all scrapes failed (network error),
+            # not that every listing was removed. Wiping active state on a failed
+            # scan would empty the dashboard and lose all history.
         return events
 
     def record_profile_analysis(

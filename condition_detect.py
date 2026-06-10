@@ -8,6 +8,7 @@ Flow:
 """
 from __future__ import annotations
 
+import json
 import re
 from decimal import Decimal
 from typing import Any
@@ -56,19 +57,12 @@ _TITLE_ONLY_ACCESSORY = [
     "ankauf", "suche iphone", "kauf iphone",
 ]
 
-# Must contain at least one of these to be a real phone listing
-# (empty = no positive requirement, just the blocklist above)
-_DEVICE_REQUIRED_ANY: list[str] = []
-
-
-import re as _re
-
 # Multi-model pattern: "11,12,13,14" or "11/12/13/14" or "(X,11,12,13)"
 # Repair shops and buy-back listings often list many models → not a single phone
-_MULTI_MODEL_PATTERN = _re.compile(
+_MULTI_MODEL_PATTERN = re.compile(
     r'\b1[0-9]\s*[,/]\s*1[0-9]\s*[,/]\s*1[0-9]'  # e.g. 11,12,13 or 11/12/13
     r'|\b(?:x|xs|xr)\s*[,/]\s*1[0-9]\s*[,/]\s*1[0-9]',  # e.g. X,11,12
-    _re.IGNORECASE,
+    re.IGNORECASE,
 )
 
 
@@ -252,7 +246,7 @@ def ai_detect_condition_batch(
         + "\n".join(lines)
     )
 
-    import json as _json
+    _json = json
     raw = _call_cond_llm(user_msg, api_key, provider, expect_json=True)
 
     if isinstance(raw, list):
@@ -289,7 +283,7 @@ def ai_assess_listing_batch(
         }
     Cached per title. Falls back to defaults on error.
     """
-    import json as _json
+    _json = json
 
     default = {"condition": COND_GOOD, "functional": True, "battery_ok": True,
                "has_box": False, "has_cable": False}
@@ -410,7 +404,7 @@ def _call_cond_llm(
     expect_json: bool = False,
 ):
     """Internal: call the configured LLM and return parsed score or list."""
-    import json as _json
+    _json = json
 
     try:
         if provider == "nvidia":
@@ -557,11 +551,11 @@ _EBAY_PLATFORM_COND: dict[str, int] = {
 # normalized score → ZOXS key (string)
 _ZOXS_MAP: dict[int, str] = {
     COND_NEW:        "1",   # Wie neu
-    COND_LIKE_NEW:   "1",   # Wie neu
+    COND_LIKE_NEW:   "2",   # Hervorragend (was "1"; "2" is ZOXS's 2nd-best tier)
     COND_VERY_GOOD:  "3",   # Sehr gut
     COND_GOOD:       "4",   # Gut
     COND_ACCEPTABLE: "65",  # Stark gebraucht
-    COND_BROKEN:     "65",  # best we can do
+    # COND_BROKEN intentionally omitted — buyback portals reject broken phones
 }
 
 # WirKaufens: {condition_key: "Label"} from buyback.py WKFS_CONDITIONS
@@ -572,7 +566,7 @@ _WKFS_MAP: dict[int, str] = {
     COND_VERY_GOOD:  "3",   # Gut
     COND_GOOD:       "2",   # In Ordnung
     COND_ACCEPTABLE: "1",   # Schlecht
-    COND_BROKEN:     "1",
+    # COND_BROKEN intentionally omitted — portals reject/reprice broken phones
 }
 
 # Clevertronic condition labels in their price dict (first 4 chars match)
@@ -583,7 +577,7 @@ _CLEVERTRONIC_PREF: dict[int, str] = {
     COND_VERY_GOOD:  "Sehr",  # "Sehr gut"
     COND_GOOD:       "Gut",
     COND_ACCEPTABLE: "Akze",  # "Akzeptabel"
-    COND_BROKEN:     "Akze",
+    # COND_BROKEN intentionally omitted — portals reject broken phones
 }
 
 
@@ -629,7 +623,10 @@ def detect_condition(
                     best_score = score
                 break
 
-    return best_score if best_score is not None else COND_GOOD
+    # Conservative fallback: when no keyword matches, default to COND_ACCEPTABLE
+    # (one level below COND_GOOD). The AI assessment is the primary grading path;
+    # this regex-only fallback should never optimistically assume "Gut" quality.
+    return best_score if best_score is not None else COND_ACCEPTABLE
 
 
 def matched_buyback_price(
@@ -648,6 +645,12 @@ def matched_buyback_price(
         "wirkaufens": None,
         "clevertronic": None,
     }
+
+    # Broken phones are rejected by buyback portals — never map to a price.
+    # The functional guard in profile_monitor should catch this, but we enforce
+    # it here as a hard safety net.
+    if condition_score == COND_BROKEN:
+        return result
 
     if zoxs_prices:
         key = _ZOXS_MAP.get(condition_score, "4")
@@ -804,7 +807,7 @@ def _fetch_vinted_details(url: str) -> tuple[list[str], str]:
     """
     try:
         from curl_cffi.requests import Session as CurlSession
-        import json as _json
+        _json = json
         with CurlSession(impersonate="chrome120") as s:
             # Do NOT override User-Agent — curl_cffi chrome120 impersonation
             # sets the full browser fingerprint. Overriding breaks it.
@@ -1052,7 +1055,7 @@ def ai_assess_listing_full(
     if not api_key or provider != "nvidia":
         return None
 
-    import json as _json
+    _json = json
 
     # Fetch images + description from listing page
     images: list[str] = []

@@ -64,9 +64,19 @@ class SettingsStore:
 
     def load(self) -> AppSettings:
         rows = {r[0]: r[1] for r in self._conn.execute("SELECT key, value FROM app_settings")}
-        # Fall back to env vars, then hardcoded defaults
+
         def get(k: str) -> str:
-            return rows.get(k) or os.getenv(k.upper(), _DEFAULTS[k])
+            # Use DB value when explicitly set (even to ""), otherwise fall
+            # back to env var, then hardcoded default.
+            # NOTE: rows.get(k) returns None (not "") when key is absent.
+            val = rows.get(k)
+            if val is not None:
+                return val
+            return os.getenv(k.upper(), _DEFAULTS[k])
+
+        provider = get("ai_provider")
+        if provider not in {"none", "deepseek", "nvidia"}:
+            provider = "none"  # reject unknown values silently
 
         return AppSettings(
             discord_webhook_url=get("discord_webhook_url"),
@@ -79,7 +89,7 @@ class SettingsStore:
             ebay_fee_rate=float(get("ebay_fee_rate") or 0.1235),
             deepseek_api_key=get("deepseek_api_key"),
             nvidia_api_key=get("nvidia_api_key"),
-            ai_provider=get("ai_provider"),
+            ai_provider=provider,
         )
 
     def save(self, settings: AppSettings) -> None:

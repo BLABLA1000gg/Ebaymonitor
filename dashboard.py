@@ -145,8 +145,11 @@ def create_app(database_path: str | Path | None = None) -> Flask:
 
     @app.get("/api/price-history")
     def price_history():
+        link = request.args.get("link", "").strip()
+        if not link:
+            return jsonify([])
         with store() as database:
-            return jsonify(database.price_history(request.args["link"]))
+            return jsonify(database.price_history(link))
 
     @app.get("/api/buyback/search")
     def buyback_search():
