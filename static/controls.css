@@ -1,35 +1,35 @@
-.monitor-controls {
+/* ── Schlanker Status-Streifen ───────────────────────────────────── */
+.monitor-strip {
   align-items: center;
   background: linear-gradient(145deg, #151e2c, #101722);
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 12px;
   display: flex;
-  gap: 18px;
-  justify-content: space-between;
-  margin-bottom: 18px;
-  padding: 16px 19px;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 10px 16px;
+  flex-wrap: wrap;
 }
 
-.monitor-controls > div:first-child {
-  padding-left: 22px;
-  position: relative;
-}
+.monitor-strip strong { font-size: 14px; }
 
-.monitor-controls p {
+.strip-detail {
   color: var(--muted);
   font-size: 12px;
-  margin-top: 4px;
+  flex: 1 1 auto;
 }
+
+.monitor-strip .control-actions { margin-left: auto; }
+
+.monitor-strip button { padding: 8px 13px; font-size: 13px; }
 
 .status-dot {
   background: #667085;
   border-radius: 50%;
   box-shadow: 0 0 0 4px #66708518;
   height: 11px;
-  left: 0;
-  position: absolute;
-  top: 4px;
   width: 11px;
+  flex-shrink: 0;
 }
 
 .status-dot.running {
@@ -63,13 +63,13 @@
 }
 
 @media (max-width: 900px) {
-  .monitor-controls {
+  .monitor-strip {
     align-items: flex-start;
-    flex-direction: column;
   }
 
-  .control-actions {
+  .monitor-strip .control-actions {
     flex-wrap: wrap;
+    margin-left: 0;
     width: 100%;
   }
 }

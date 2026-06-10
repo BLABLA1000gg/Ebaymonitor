@@ -74,6 +74,7 @@ button {
   font-weight: 800;
   cursor: pointer;
   font-size: 14px;
+  box-shadow: inset 0 1px 0 #ffffff33;
 }
 
 /* <a> styled as button */
@@ -87,7 +88,7 @@ a.button {
   text-decoration: none;
 }
 
-.secondary { background: #253044; color: var(--text); }
+.secondary { background: #253044; color: var(--text); border: 1px solid #3a4d66; }
 .stop      { background: var(--red); color: #000; }
 .danger    { background: var(--red); color: #000; }
 
@@ -150,9 +151,23 @@ main {
 }
 
 .profile.active {
-  background: #55d6be18;
+  background: #55d6be28;
   border-color: var(--accent);
   color: var(--accent);
+  font-weight: 600;
+}
+
+.pill-count {
+  display: inline-block;
+  margin-left: 5px;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #4ade8022;
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
 }
 
 /* ── Toolbar ─────────────────────────────────────────────────────── */
@@ -210,7 +225,59 @@ main {
   margin-bottom: 10px;
 }
 
-.metrics strong { font-size: 23px; }
+.metrics strong { font-size: 20px; }
+
+.metrics article.metric-highlight strong {
+  font-size: 30px;
+  color: var(--green);
+  text-shadow: 0 0 18px #4ade8033;
+}
+
+/* ── Deal-Übersicht (Hero) ───────────────────────────────────────── */
+.deal-hero {
+  min-height: 100px;
+  display: flex;
+  align-items: center;
+  padding: 0 26px;
+  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(145deg, #151e2c, #101722);
+}
+
+.deal-hero.has-deals {
+  border-color: var(--green);
+  background: linear-gradient(145deg, #0d2b1f, #091a14);
+}
+
+.hero-line { font-size: 20px; }
+.hero-line strong { font-weight: 800; }
+.hero-profit { color: var(--green); }
+.hero-sep { color: var(--muted); margin: 0 10px; }
+.hero-calm { color: var(--muted); font-size: 16px; }
+
+/* ── Markt-Kontext (eingeklappt) ─────────────────────────────────── */
+.market-context {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(145deg, #151e2c, #101722);
+  padding: 4px 18px;
+}
+
+.market-context > summary {
+  cursor: pointer;
+  padding: 14px 4px;
+  color: var(--muted);
+  font-size: 14px;
+  list-style: none;
+}
+.market-context > summary::-webkit-details-marker { display: none; }
+.market-context > summary::before { content: '▸ '; color: var(--accent); }
+.market-context[open] > summary::before { content: '▾ '; }
+.market-context > summary:hover { color: var(--text); }
+.market-context .metrics { margin-top: 4px; }
+.market-context .panel.buyback-ref { background: transparent; border: 0; padding: 0; }
 
 .demand { text-transform: capitalize; }
 .demand.high   { color: var(--accent); }
@@ -266,7 +333,7 @@ table {
 
 th, td {
   text-align: left;
-  padding: 11px 10px;
+  padding: 14px 12px;
   border-top: 1px solid var(--line);
 }
 
@@ -278,15 +345,55 @@ th {
   white-space: nowrap;
 }
 
-/* ── Worth-It Zeilen (prominente Hervorhebung) ───────────────────── */
-.worth-it-row {
-  background: #0a2e1c;
-  border-left: 4px solid var(--green);
-  box-shadow: inset 0 0 0 1px #4ade8018;
+/* Sortierbare Spaltenköpfe */
+thead th {
+  position: sticky;
+  top: 96px;
+  background: var(--panel);
+  z-index: 5;
 }
 
-.worth-it-row td:first-child { padding-left: 14px; }
-.worth-it-row:hover { background: #0c3520; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--text); }
+th.sort-asc::after  { content: ' ▲'; color: var(--accent); font-size: 9px; }
+th.sort-desc::after { content: ' ▼'; color: var(--accent); font-size: 9px; }
+
+/* ── Worth-It Zeilen (prominente Hervorhebung) ───────────────────── */
+.worth-it-row > td {
+  background: #0d3522;
+  box-shadow: inset 0 0 14px #4ade8014;
+}
+
+.worth-it-row > td:first-child {
+  border-left: 5px solid var(--green);
+  padding-left: 14px;
+}
+
+.worth-it-row:hover > td { background: #114229; }
+
+/* Geprüfte Zeilen (lokal markiert) */
+.seen-row { opacity: .45; }
+.seen-row .listing-link { text-decoration: line-through; }
+
+/* Öffnen + gesehen Button */
+.seen-btn {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid #3a4d66;
+  border-radius: 7px;
+  padding: 3px 9px;
+}
+.seen-btn:hover { color: var(--text); border-color: var(--muted); text-decoration: none; }
+
+/* Dominante Profit-Zelle */
+.profit-cell {
+  font-size: 20px;
+  font-weight: 900;
+}
+.profit-cell.profit-pos { color: var(--green); }
+.profit-cell.profit-neg { color: var(--red); }
 
 .no-badge { opacity: .2; }
 
@@ -316,9 +423,10 @@ th {
   background: #55d6be1c;
   color: var(--accent);
   border-radius: 8px;
-  min-width: 42px;
+  min-width: 46px;
   padding: 5px;
   font-weight: 700;
+  font-size: 13px;
 }
 
 /* ── Profit / ROI ────────────────────────────────────────────────── */
@@ -475,4 +583,10 @@ th {
 .risk-niedrig { background: rgba(74,222,128,.15); color: #4ade80; }
 .risk-mittel  { background: rgba(244,184,96,.15); color: #f4b860; }
 .risk-hoch    { background: rgba(255,107,122,.15); color: #ff6b7a; }
-.ai-reason { font-size: 11px; color: var(--muted); margin-top: 4px; max-width: 240px; line-height: 1.35; }
+.ai-reason { font-size: 11px; color: #6b7a8f; font-style: italic; margin-top: 4px; max-width: 280px; line-height: 1.35; }
+
+/* Gedämpfte Hilfstexte */
+.time-cell, .roi-small { color: #6b7a8f; }
+
+/* Ankaufspreis-Badges enger */
+.buyback-ref-grid .ct-badge { padding: 2px 6px; font-size: 10px; margin: 2px 2px 2px 0; }

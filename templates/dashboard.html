@@ -26,37 +26,35 @@
 
 <main>
 
-  {# ── Monitor-Steuerung ──────────────────────────────────────────── #}
-  <section class="monitor-controls">
-    <div>
-      <span id="monitor-dot" class="status-dot {% if monitor_status.running %}running{% endif %}"></span>
-      <strong id="monitor-state">
-        {% if monitor_status.scanning %}Scan läuft…
-        {% elif monitor_status.running %}Monitor läuft
-        {% else %}Monitor gestoppt
-        {% endif %}
-      </strong>
-      <p id="monitor-detail">
-        {% if monitor_status.last_error %}
-          Fehler: {{ monitor_status.last_error }}
-        {% elif monitor_status.last_result %}
-          Letzter Scan: {{ monitor_status.last_result }}
-        {% else %}
-          Noch kein Scan abgeschlossen
-        {% endif %}
-      </p>
-    </div>
+  {# ── Monitor-Steuerung (schlanker Status-Streifen) ──────────────── #}
+  <section class="monitor-strip">
+    <span id="monitor-dot" class="status-dot {% if monitor_status.running %}running{% endif %}"></span>
+    <strong id="monitor-state">
+      {% if monitor_status.scanning %}Scan läuft…
+      {% elif monitor_status.running %}Monitor läuft
+      {% else %}Monitor gestoppt
+      {% endif %}
+    </strong>
+    <span id="monitor-detail" class="strip-detail">
+      {% if monitor_status.last_error %}
+        Fehler: {{ monitor_status.last_error }}
+      {% elif monitor_status.last_result %}
+        Letzter Scan: {{ monitor_status.last_result }}
+      {% else %}
+        Noch kein Scan abgeschlossen
+      {% endif %}
+    </span>
     <div class="control-actions">
       <form method="post" action="{{ url_for('monitor_scan') }}">
         <button type="submit" class="secondary">Jetzt scannen</button>
       </form>
       {% if monitor_status.running %}
         <form method="post" action="{{ url_for('monitor_stop') }}">
-          <button type="submit" class="stop">Monitor stoppen</button>
+          <button type="submit" class="stop">Stoppen</button>
         </form>
       {% else %}
         <form method="post" action="{{ url_for('monitor_start') }}">
-          <button type="submit">Monitor starten</button>
+          <button type="submit">Starten</button>
         </form>
       {% endif %}
     </div>
@@ -72,9 +70,11 @@
   {# ── Profil-Navigation ────────────────────────────────────────── #}
   <nav class="profiles" aria-label="Suchprofile">
     {% for item in profiles %}
+      {% set pc = (profile_worth_counts or {}).get(item.id, 0) %}
       <a class="profile {% if item.id == selected_profile_id %}active{% endif %}"
          href="/?profile={{ item.id }}">
         {{ item.name }}
+        {% if pc and pc > 0 %}<span class="pill-count">{{ pc }}</span>{% endif %}
       </a>
     {% endfor %}
   </nav>
@@ -100,87 +100,31 @@
       <a class="edit-link" href="{{ url_for('profile_form', profile_id=current.id) }}">Profil bearbeiten</a>
     </section>
 
-    {# ── KPIs ────────────────────────────────────────────────────── #}
-    {% set worth_it_count = deals|selectattr('worth_it')|list|length if deals else 0 %}
-    <section class="metrics">
-      <article class="{% if worth_it_count > 0 %}metric-highlight{% endif %}">
-        <span>Lohnenswerte Deals</span>
-        <strong class="{% if worth_it_count > 0 %}demand high{% endif %}">{{ worth_it_count }}</strong>
-      </article>
-      <article>
-        <span>Verkaufs-Median</span>
-        <strong>{% if snapshot and snapshot.median_sold_price is not none %}{{ snapshot.median_sold_price }}&nbsp;{{ current.currency or '€' }}{% else %}k.A.{% endif %}</strong>
-      </article>
-      <article>
-        <span>Verkäufe / Monat</span>
-        <strong>{{ '%.1f'|format(snapshot.sold_per_month|float) if snapshot else 'k.A.' }}</strong>
-      </article>
-      <article>
-        <span>Abverkaufsrate</span>
-        <strong>{{ '%.0f%%'|format(snapshot.sell_through_rate|float * 100) if snapshot and snapshot.sell_through_rate else 'k.A.' }}</strong>
-      </article>
-      <article>
-        <span>Verkaufsdauer (Tage)</span>
-        <strong>{{ '%.0f'|format(snapshot.estimated_days_to_sell|float) if snapshot and snapshot.estimated_days_to_sell else 'k.A.' }}</strong>
-      </article>
-      <article>
-        <span>Nachfrage</span>
-        <strong class="demand {{ snapshot.demand if snapshot else '' }}">
-          {% if snapshot %}{{ {'low': 'Niedrig', 'medium': 'Mittel', 'high': 'Hoch'}.get(snapshot.demand, snapshot.demand | capitalize) }}{% else %}k.A.{% endif %}
-        </strong>
-      </article>
-    </section>
-
-    {# ── Charts ──────────────────────────────────────────────────── #}
-    <section class="charts">
-      <article>
-        <h3>Verkaufspreis-Trend</h3>
-        <canvas id="priceChart">Chart konnte nicht geladen werden.</canvas>
-      </article>
-      <article>
-        <h3>Nachfrage-Trend</h3>
-        <canvas id="demandChart">Chart konnte nicht geladen werden.</canvas>
-      </article>
-    </section>
-
-    {# ── Deals-Tabelle ───────────────────────────────────────────── #}
+    {# ── gemeinsame Flags / Makros ───────────────────────────────── #}
     {% set has_flip    = deals and deals|selectattr('ref_median')|list|length > 0 %}
     {% set has_buyback = deals and (deals[0].zoxs_prices or deals[0].wirkaufens_prices or deals[0].clevertronic_prices) %}
     {% set has_score   = snapshot and snapshot.median_sold_price is not none %}
-    {% set col_count   = 4 + (1 if has_score else 0) + (3 if has_flip else 0) + (2 if has_buyback else 0) %}
+    {% set col_count   = 5 + (1 if has_score else 0) + (3 if has_flip else 0) + (3 if has_buyback else 0) %}
 
     {% macro de_eur(value) %}{{ ('%.2f'|format(value|float))|replace('.', ',') }}&nbsp;€{% endmacro %}
 
-    {# ── Ankaufspreis-Referenz (einmal, nicht pro Zeile) ─────────── #}
-    {% if has_buyback %}
-    <section class="panel buyback-ref">
-      <div class="panel-title">
-        <h3>Ankaufspreise (Referenz)</h3>
-        <span>Häufigste Speichergröße des Profils — Bewertung je Anzeige nutzt deren eigene Größe</span>
-      </div>
-      {% set cond_order = ['Neu', 'Wie neu', 'Wie Neu', 'Hervorragend', 'Sehr gut',
-                           'Gut', 'In Ordnung', 'Gebraucht', 'Akzeptabel',
-                           'Stark gebraucht', 'Schlecht', 'Beschädigt'] %}
-      <div class="buyback-ref-grid">
-        {% for portal, prices, cls in [
-              ('Clevertronic', deals[0].clevertronic_prices, 'ct-badge'),
-              ('ZOXS',         deals[0].zoxs_prices,         'ct-badge zoxs-badge'),
-              ('WirKaufens',   deals[0].wirkaufens_prices,   'ct-badge wkfs-badge')] %}
-          {% if prices %}
-          <div>
-            <h4>{{ portal }}</h4>
-            {% for cond in cond_order %}
-              {% if cond in prices %}
-                <span class="{{ cls }}" title="{{ cond }}">{{ cond }}: {{ de_eur(prices[cond]) }}</span>
-              {% endif %}
-            {% endfor %}
-          </div>
-          {% endif %}
-        {% endfor %}
-      </div>
+    {# ── Deal-Übersicht (Hero) ───────────────────────────────────── #}
+    {% set ds = deal_summary or {'count': 0, 'profit': 0, 'capital': 0} %}
+    <section class="deal-hero {% if ds.count and ds.count > 0 %}has-deals{% endif %}">
+      {% if ds.count and ds.count > 0 %}
+        <span class="hero-line">
+          🟢 <strong>{{ ds.count }}</strong> lohnenswerte{{ 'r' if ds.count == 1 else '' }} Deal{{ '' if ds.count == 1 else 's' }}
+          <span class="hero-sep">·</span>
+          <strong class="hero-profit">+{{ '%.0f'|format((ds.profit or 0)|float) }} €</strong> Profit
+          <span class="hero-sep">·</span>
+          <strong>{{ '%.0f'|format((ds.capital or 0)|float) }} €</strong> Kapital nötig
+        </span>
+      {% else %}
+        <span class="hero-line hero-calm">Keine lohnenswerten Deals im aktuellen Scan</span>
+      {% endif %}
     </section>
-    {% endif %}
 
+    {# ── Deals-Tabelle ───────────────────────────────────────────── #}
     <section class="panel">
       <div class="panel-title">
         <div>
@@ -188,7 +132,7 @@
           <p>{% if has_score %}Score 50 = eBay-Median &nbsp;·&nbsp; {% endif %}✅ = Lohnt sich zum Kauf</p>
         </div>
         <label class="filter-toggle">
-          <input type="checkbox" id="filter-worth-it"> Nur lohnenswerte anzeigen
+          <input type="checkbox" id="filter-worth-it" checked> Nur lohnenswerte anzeigen
         </label>
       </div>
 
@@ -196,30 +140,40 @@
         <table id="deals-table">
           <thead>
             <tr>
-              <th aria-label="Lohnt sich">Deal</th>
+              <th aria-label="Lohnt sich" class="sortable" data-sort="worth" data-type="num">Deal</th>
               <th>Anzeige</th>
-              <th>Preis</th>
+              <th class="sortable" data-sort="price" data-type="num">Preis</th>
               {% if has_score %}
-              <th>Score
+              <th class="sortable" data-sort="score" data-type="num">Score
                 <span class="tooltip-icon" title="Score = Angebotspreis ÷ eBay-Median × 100. Score 50 = halber Medianpreis — möglicher 2×-Flip.">?</span>
               </th>
               {% endif %}
-              <th>Entdeckt</th>
+              <th class="sortable" data-sort="time" data-type="num">Entdeckt</th>
               {% if has_flip %}
                 <th>eBay Median</th>
-                <th>Profit</th>
+                <th class="sortable" data-sort="profit" data-type="num">Profit</th>
                 <th>ROI</th>
               {% endif %}
               {% if has_buyback %}
                 <th>Zustand</th>
-                <th>Profit (Ankauf)</th>
+                <th class="sortable" data-sort="risk" data-type="risk">Risiko</th>
+                <th class="sortable" data-sort="profit" data-type="num">Profit (Ankauf)</th>
               {% endif %}
               <th>Plattform-Zustand</th>
             </tr>
           </thead>
+          {% set risk_rank = {'niedrig': 1, 'mittel': 2, 'hoch': 3} %}
           {% macro deal_row(deal, has_flip, has_buyback, has_score) %}
+              {% set sort_profit = deal.condition_profit if deal.condition_profit is not none else (deal.flip_profit if deal.flip_profit is not none else '') %}
               <tr class="{{ 'worth-it-row' if deal.worth_it else '' }}"
-                  data-worth-it="{{ 'true' if deal.worth_it else 'false' }}">
+                  data-worth-it="{{ 'true' if deal.worth_it else 'false' }}"
+                  data-link="{{ deal.link }}"
+                  data-sv-worth="{{ '1' if deal.worth_it else '0' }}"
+                  data-sv-price="{{ deal.current_price if deal.current_price is not none else '' }}"
+                  data-sv-score="{{ '%.0f'|format(deal.deal_score|float) if deal.deal_score is not none else '' }}"
+                  data-sv-time="{{ deal.first_seen or '' }}"
+                  data-sv-profit="{{ '%.2f'|format(sort_profit|float) if sort_profit != '' else '' }}"
+                  data-sv-risk="{{ risk_rank.get(deal.ai_risk, 0) }}">
 
                 {# Deal-Badge #}
                 <td>
@@ -230,12 +184,17 @@
                   {% endif %}
                 </td>
 
-                {# Inserat-Link #}
+                {# Inserat-Link + Aktionen #}
                 <td class="listing-cell">
                   <a href="{{ deal.link }}" target="_blank" rel="noopener" class="listing-link">
                     {{ deal.title }}
                     <span class="ext-icon" aria-hidden="true">↗</span>
                   </a>
+                  {% if deal.ai_reason %}
+                    <div class="ai-reason">{{ deal.ai_reason }}</div>
+                  {% endif %}
+                  <a href="{{ deal.link }}" target="_blank" rel="noopener"
+                     class="seen-btn" data-seen-link="{{ deal.link }}">Öffnen + gesehen</a>
                 </td>
 
                 {# Preis #}
@@ -248,19 +207,15 @@
                 </td>
                 {% endif %}
 
-                {# Entdeckt (relativ) — first_seen, nicht last_seen: last_seen
-                   ist für alle aktiven Anzeigen identisch (Scan-Zeitpunkt). #}
-                <td class="time-cell" data-ts="{{ deal.first_seen }}"
-                    title="{{ deal.first_seen[:16] }}">
-                  {{ deal.first_seen[:16] }}
-                </td>
+                {# Entdeckt (relativ) — JS füllt den Text, damit kein ISO aufblitzt. #}
+                <td class="time-cell" data-ts="{{ deal.first_seen or '' }}"></td>
 
                 {# eBay Flip-Daten #}
                 {% if has_flip %}
                   {% if deal.ref_median %}
                     <td>{{ '%.0f'|format(deal.ref_median) if deal.ref_median is not none else '–' }} €</td>
-                    <td class="{{ 'profit-pos' if deal.flip_profit and deal.flip_profit > 0 else 'profit-neg' }}">
-                      <b>{{ '%+.0f'|format(deal.flip_profit) if deal.flip_profit is not none else '–' }} €</b>
+                    <td class="profit-cell {{ 'profit-pos' if deal.flip_profit and deal.flip_profit > 0 else 'profit-neg' }}">
+                      {{ '%+.0f'|format(deal.flip_profit) if deal.flip_profit is not none else '–' }} €
                     </td>
                     <td>{{ '%.0f%%'|format(deal.flip_roi * 100) if deal.flip_roi is not none else '—' }}</td>
                   {% else %}
@@ -274,21 +229,21 @@
                     {% if deal.detected_condition %}
                       <span class="cond-badge">{{ deal.detected_condition }}</span>
                     {% else %}—{% endif %}
+                  </td>
+                  {# Risiko (eigene Spalte) #}
+                  <td>
                     {% if deal.ai_risk %}
                       <span class="risk-badge risk-{{ deal.ai_risk }}"
-                            title="KI-Risiko für Blindkauf: {{ deal.ai_risk }}">
-                        KI: {{ deal.ai_risk }}
+                            title="{{ deal.ai_reason or ('KI-Risiko für Blindkauf: ' ~ deal.ai_risk) }}">
+                        {{ deal.ai_risk }}
                       </span>
-                    {% endif %}
-                    {% if deal.ai_reason %}
-                      <div class="ai-reason">{{ deal.ai_reason }}</div>
-                    {% endif %}
+                    {% else %}—{% endif %}
                   </td>
                   <td>
                     {% if deal.condition_profit is not none %}
-                      <b class="{{ 'profit-pos' if deal.condition_profit > 0 else 'profit-neg' }}">
+                      <span class="profit-cell {{ 'profit-pos' if deal.condition_profit > 0 else 'profit-neg' }}">
                         {{ '%+.0f'|format(deal.condition_profit) }} €
-                      </b>
+                      </span>
                       {% if deal.condition_roi is not none %}
                         <small class="roi-small">{{ '%.0f%%'|format(deal.condition_roi * 100) }}</small>
                       {% endif %}
@@ -320,6 +275,79 @@
         </table>
       </div>
     </section>
+
+    {# ── Markt-Kontext (eingeklappt) ─────────────────────────────── #}
+    <details class="market-context">
+      <summary>Markt-Kontext anzeigen</summary>
+
+      {# KPIs #}
+      <section class="metrics">
+        <article>
+          <span>Verkaufs-Median</span>
+          <strong>{% if snapshot and snapshot.median_sold_price is not none %}{{ snapshot.median_sold_price }}&nbsp;{{ current.currency or '€' }}{% else %}k.A.{% endif %}</strong>
+        </article>
+        <article>
+          <span>Verkäufe / Monat</span>
+          <strong>{{ '%.1f'|format(snapshot.sold_per_month|float) if snapshot and snapshot.sold_per_month is not none else 'k.A.' }}</strong>
+        </article>
+        <article>
+          <span>Abverkaufsrate</span>
+          <strong>{{ '%.0f%%'|format(snapshot.sell_through_rate|float * 100) if snapshot and snapshot.sell_through_rate else 'k.A.' }}</strong>
+        </article>
+        <article>
+          <span>Verkaufsdauer (Tage)</span>
+          <strong>{{ '%.0f'|format(snapshot.estimated_days_to_sell|float) if snapshot and snapshot.estimated_days_to_sell else 'k.A.' }}</strong>
+        </article>
+        <article>
+          <span>Nachfrage</span>
+          <strong class="demand {{ snapshot.demand if snapshot else '' }}">
+            {% if snapshot %}{{ {'low': 'Niedrig', 'medium': 'Mittel', 'high': 'Hoch'}.get(snapshot.demand, snapshot.demand | capitalize) }}{% else %}k.A.{% endif %}
+          </strong>
+        </article>
+      </section>
+
+      {# Charts #}
+      <section class="charts">
+        <article>
+          <h3>Verkaufspreis-Trend</h3>
+          <canvas id="priceChart">Chart konnte nicht geladen werden.</canvas>
+        </article>
+        <article>
+          <h3>Nachfrage-Trend</h3>
+          <canvas id="demandChart">Chart konnte nicht geladen werden.</canvas>
+        </article>
+      </section>
+
+      {# Ankaufspreis-Referenz #}
+      {% if has_buyback %}
+      <section class="panel buyback-ref">
+        <div class="panel-title">
+          <h3>Ankaufspreise (Referenz)</h3>
+          <span>Häufigste Speichergröße des Profils — Bewertung je Anzeige nutzt deren eigene Größe</span>
+        </div>
+        {% set cond_order = ['Neu', 'Wie neu', 'Wie Neu', 'Hervorragend', 'Sehr gut',
+                             'Gut', 'In Ordnung', 'Gebraucht', 'Akzeptabel',
+                             'Stark gebraucht', 'Schlecht', 'Beschädigt'] %}
+        <div class="buyback-ref-grid">
+          {% for portal, prices, cls in [
+                ('Clevertronic', deals[0].clevertronic_prices, 'ct-badge'),
+                ('ZOXS',         deals[0].zoxs_prices,         'ct-badge zoxs-badge'),
+                ('WirKaufens',   deals[0].wirkaufens_prices,   'ct-badge wkfs-badge')] %}
+            {% if prices %}
+            <div>
+              <h4>{{ portal }}</h4>
+              {% for cond in cond_order %}
+                {% if cond in prices %}
+                  <span class="{{ cls }}" title="{{ cond }}">{{ cond }}: {{ de_eur(prices[cond]) }}</span>
+                {% endif %}
+              {% endfor %}
+            </div>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+    </details>
 
   {% endif %}{# /if profiles #}
 </main>
@@ -403,15 +431,76 @@ fetch('/api/profiles/{{ selected_profile_id }}/trend')
   updateTimeCells();
   setInterval(updateTimeCells, 60000);
 
-  // Worth-it filter toggle
+  // Worth-it filter toggle — defaults ON, persisted in localStorage
   const filterCb = document.getElementById('filter-worth-it');
+  function applyFilter() {
+    if (!filterCb) return;
+    document.querySelectorAll('#deals-table tbody tr[data-worth-it]').forEach(row => {
+      row.style.display = (filterCb.checked && row.dataset.worthIt !== 'true') ? 'none' : '';
+    });
+  }
   if (filterCb) {
+    const stored = localStorage.getItem('filter_worth_it');
+    if (stored !== null) filterCb.checked = stored === '1';
+    applyFilter();
     filterCb.addEventListener('change', function () {
-      document.querySelectorAll('#deals-table tbody tr[data-worth-it]').forEach(row => {
-        row.style.display = (filterCb.checked && row.dataset.worthIt !== 'true') ? 'none' : '';
+      localStorage.setItem('filter_worth_it', filterCb.checked ? '1' : '0');
+      applyFilter();
+    });
+  }
+
+  // Column sorting (vanilla JS) — click headers; profit desc / risk asc
+  const table = document.getElementById('deals-table');
+  if (table) {
+    const tbody = table.querySelector('tbody');
+    table.querySelectorAll('th.sortable').forEach(th => {
+      th.style.cursor = 'pointer';
+      th.addEventListener('click', () => {
+        const key = th.dataset.sort, type = th.dataset.type;
+        const asc = th.dataset.dir !== 'asc';
+        table.querySelectorAll('th.sortable').forEach(o => { o.dataset.dir = ''; o.classList.remove('sort-asc','sort-desc'); });
+        th.dataset.dir = asc ? 'asc' : 'desc';
+        th.classList.add(asc ? 'sort-asc' : 'sort-desc');
+        const rows = Array.from(tbody.querySelectorAll('tr[data-worth-it]'));
+        rows.sort((a, b) => {
+          let av = a.dataset['sv' + key.charAt(0).toUpperCase() + key.slice(1)] || '';
+          let bv = b.dataset['sv' + key.charAt(0).toUpperCase() + key.slice(1)] || '';
+          let cmp;
+          if (key === 'time') {
+            const toMs = v => { if (!v) return -Infinity; const s = /[zZ]|[+-]\d{2}/.test(v) ? v : v + 'Z'; const t = Date.parse(s); return isNaN(t) ? -Infinity : t; };
+            cmp = toMs(av) - toMs(bv);
+          } else if (type === 'num' || type === 'risk') {
+            const an = parseFloat(av), bn = parseFloat(bv);
+            cmp = (isNaN(an) ? -Infinity : an) - (isNaN(bn) ? -Infinity : bn);
+          } else {
+            cmp = String(av).localeCompare(String(bv));
+          }
+          return asc ? cmp : -cmp;
+        });
+        rows.forEach(r => tbody.appendChild(r));
       });
     });
   }
+
+  // Per-row "Öffnen + gesehen" — mark row checked, persisted by link
+  const SEEN_KEY = 'deals_seen';
+  function getSeen() { try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}'); } catch (e) { return {}; } }
+  function markSeen(link) {
+    const seen = getSeen(); seen[link] = 1;
+    localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+  }
+  const seen = getSeen();
+  document.querySelectorAll('#deals-table tbody tr[data-link]').forEach(row => {
+    if (seen[row.dataset.link]) row.classList.add('seen-row');
+  });
+  document.querySelectorAll('.seen-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const link = btn.dataset.seenLink;
+      markSeen(link);
+      const row = btn.closest('tr');
+      if (row) row.classList.add('seen-row');
+    });
+  });
 
   // Monitor status polling — shows a banner instead of auto-reloading
   setInterval(() => {

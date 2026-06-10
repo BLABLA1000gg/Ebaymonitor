@@ -265,7 +265,27 @@ class MonitorStore:
                 d["condition_roi"] = float(cr) if cr else None
                 deals.append(d)
 
-        return {"profiles":profiles,"selected_profile_id":selected,"snapshot":dict(snapshot) if snapshot else None,"trend":[dict(x) for x in trend or []],"deals":deals or []}
+        deal_list = deals or []
+        worth = [d for d in deal_list if d.get("worth_it")]
+        summary = {
+            "count": len(worth),
+            "profit": sum((d.get("condition_profit") or 0.0) for d in worth),
+            "capital": sum(
+                float(d["current_price"]) for d in worth
+                if d.get("current_price") is not None
+            ),
+        }
+
+        # Per-profile worth-it counts for the profile pills (single grouped query).
+        worth_counts = {}
+        for row in self.connection.execute(
+            "SELECT profile_id, COUNT(*) AS n "
+            "FROM profile_listings pl JOIN listings l ON l.link=pl.link "
+            "WHERE pl.worth_it=1 AND l.active=1 GROUP BY profile_id"
+        ).fetchall():
+            worth_counts[row["profile_id"]] = row["n"]
+
+        return {"profiles":profiles,"selected_profile_id":selected,"snapshot":dict(snapshot) if snapshot else None,"trend":[dict(x) for x in trend or []],"deals":deal_list,"deal_summary":summary,"profile_worth_counts":worth_counts}
 
     def price_history(self, link):
         return [dict(row) for row in self.connection.execute("SELECT price,observed_at FROM price_history WHERE link=? ORDER BY observed_at", (link,))]
