@@ -29,37 +29,124 @@ def _store(key: str, results: list[dict]) -> list[dict]:
 # WirKaufens – Elasticsearch-backed product search                    #
 # ------------------------------------------------------------------ #
 
+def _wkfs_es_source(query: str) -> str:
+    """Build the Elasticsearch source payload as WirKaufens' frontend does."""
+    return json.dumps({
+        "query": {
+            "function_score": {
+                "query": {
+                    "bool": {
+                        "should": [
+                            {"multi_match": {"fields": ["model^2", "searchTerms^2"],
+                                             "query": query, "type": "phrase_prefix"}},
+                            {"match": {"searchTerms": {"query": query, "fuzziness": "AUTO"}}}
+                        ]
+                    }
+                },
+                "functions": [{"field_value_factor": {"field": "releaseYear", "factor": 1,
+                                                      "missing": 0, "modifier": "none"}}],
+                "boost_mode": "sum"
+            }
+        }
+    }, ensure_ascii=False)
+
+
+def _wkfs_filter_hits(hits: list[dict], query: str) -> list[dict]:
+    """Keep hits where every query word appears (GB/TB-normalised, with
+    number boundaries so '12' doesn't match inside '128GB') in the name."""
+    qwords = [w for w in query.lower().split() if len(w) >= 2]
+    out: list[dict] = []
+    for x in hits:
+        if not x.get("id"):
+            continue
+        nl = re.sub(r"(\d)\s+(gb|tb)", r"\1\2", x.get("name", "").lower())
+        ok = True
+        for w in qwords:
+            wn = re.sub(r"(\d)\s+(gb|tb)", r"\1\2", w)
+            if re.fullmatch(r"\d+", wn):
+                if not re.search(r"(?<!\d)" + re.escape(wn) + r"(?!\d)", nl):
+                    ok = False
+                    break
+            else:
+                gb = re.fullmatch(r"(\d+)(gb|tb)", wn)
+                if gb:
+                    if not re.search(r"(?<!\d)" + gb.group(1) + gb.group(2), nl):
+                        ok = False
+                        break
+                elif wn not in nl:
+                    ok = False
+                    break
+        if ok:
+            out.append(x)
+    return out
+
+
 def search_wirkaufens(query: str) -> list[dict]:
-    """Search WirKaufens product catalogue. Returns [{name, url, id}]."""
+    """Search WirKaufens product catalogue. Returns [{name, url, id}].
+
+    Primary path: direct curl_cffi POST to the public search endpoint
+    ``https://wirkaufens.de/trade-in/searches`` (no browser, no cookies
+    needed). The old Playwright flow remains as fallback only.
+    """
     key = f"wkfs:{query.lower()}"
     cached = _cached(key)
     if cached is not None:
         return cached
 
     try:
+        from curl_cffi.requests import Session as CurlSession
+
+        body = {
+            "search": "&source=" + _wkfs_es_source(query) + "&source_content_type=application/json",
+            "application": "shop-de",
+            "resultSize": 100,
+        }
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": "https://wirkaufens.de",
+            "Referer": "https://wirkaufens.de/",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+        }
+        data = None
+        with CurlSession(impersonate="chrome120") as s:
+            for attempt in range(2):
+                try:
+                    r = s.post("https://wirkaufens.de/trade-in/searches",
+                               json=body, headers=headers, timeout=15)
+                    if r.status_code == 200:
+                        data = r.json()
+                        break
+                except Exception:
+                    if attempt == 1:
+                        raise
+        raw_hits = ((data or {}).get("hits") or {}).get("hits") or []
+        hits = [
+            {
+                "id": h.get("_source", {}).get("id"),
+                "name": h.get("_source", {}).get("name", ""),
+                "url": "https://wirkaufens.de/produkte/" + h.get("_source", {}).get("url", ""),
+            }
+            for h in raw_hits
+        ]
+        results = _wkfs_filter_hits(hits, query)
+        if results:
+            return _store(key, results)
+    except Exception:
+        pass
+
+    return _search_wirkaufens_browser(query, key)
+
+
+def _search_wirkaufens_browser(query: str, key: str) -> list[dict]:
+    """Playwright fallback for the WirKaufens product search."""
+    try:
         from playwright.sync_api import sync_playwright
 
-        import json as _json
-
-        # Build ES source as the browser does (plain text query inside JSON)
-        es_source = _json.dumps({
-            "query": {
-                "function_score": {
-                    "query": {
-                        "bool": {
-                            "should": [
-                                {"multi_match": {"fields": ["model^2", "searchTerms^2"],
-                                                 "query": query, "type": "phrase_prefix"}},
-                                {"match": {"searchTerms": {"query": query, "fuzziness": "AUTO"}}}
-                            ]
-                        }
-                    },
-                    "functions": [{"field_value_factor": {"field": "releaseYear", "factor": 1,
-                                                          "missing": 0, "modifier": "none"}}],
-                    "boost_mode": "sum"
-                }
-            }
-        }, ensure_ascii=False)
+        es_source = _wkfs_es_source(query)
 
         with sync_playwright() as p:
             browser = p.chromium.launch(

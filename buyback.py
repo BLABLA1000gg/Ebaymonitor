@@ -511,12 +511,106 @@ class BuybackScraper:
         """
         Scrape WirKaufens Ankaufpreise for all conditions of a product.
 
-        functional / battery_ok map to WirKaufens questions:
-          - Question 4 (Gerät einwandfrei benutzbar?): functional → 1 (Ja) or 0 (Nein)
-          - Question 2 (Batterie in Ordnung?):          battery_ok → 1 (Ja) or 0 (Nein)
+        functional / battery_ok answer WirKaufens' condition questions, which
+        are discovered dynamically from the product page (matched by their
+        question ``code``/text, e.g. POWERON_AND_USEABLE → functional,
+        BATTERY_CONDITION → battery_ok). Answer values are the page's own
+        answer ids (Ja=1, Nein=2).
 
         Returns {condition_label: price} for all conditions.
+
+        Implementation: no browser needed. The product page is Nuxt SSR; its
+        ``__NUXT_DATA__`` blob embeds the numeric device id and the full
+        question/answer catalogue, and the price endpoint
+        ``POST /trade-in/devices`` answers plain curl_cffi chrome120 requests
+        without any cookies. One GET + one POST per condition replaces the
+        old full-browser flow; the browser path remains as fallback only.
         """
+        result: dict[str, Decimal] = {}
+        try:
+            result = self._wirkaufens_api(url, functional, battery_ok)
+        except Exception:
+            LOGGER.warning("WirKaufens: API scrape failed for %s — falling back to browser", url, exc_info=True)
+        if result:
+            return result
+        try:
+            return self._wirkaufens_browser(url, functional, battery_ok)
+        except Exception:
+            LOGGER.warning("WirKaufens: browser fallback failed for %s", url, exc_info=True)
+            return {}
+
+    def _wirkaufens_api(self, url: str, functional: bool, battery_ok: bool) -> dict[str, Decimal]:
+        """Direct JSON-API scrape of WirKaufens Ankaufpreise (no browser)."""
+        from curl_cffi.requests import Session as CurlSession
+
+        ua = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        result: dict[str, Decimal] = {}
+        with CurlSession(impersonate="chrome120") as s:
+            html = ""
+            for attempt in range(2):
+                try:
+                    r = s.get(
+                        url,
+                        headers={
+                            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                            "Accept-Language": "de-DE,de;q=0.9",
+                            "User-Agent": ua,
+                        },
+                        timeout=20,
+                    )
+                    if r.status_code == 200 and "__NUXT_DATA__" in r.text:
+                        html = r.text
+                        break
+                except Exception:
+                    if attempt == 1:
+                        raise
+            if not html:
+                return result
+
+            device_id, questions = _wkfs_parse_product(html, functional, battery_ok)
+            if not device_id:
+                return result
+
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": ua,
+                "Referer": url,
+                "Origin": "https://wirkaufens.de",
+            }
+            for cond_id, cond_name in WKFS_CONDITIONS.items():
+                body = json.dumps({
+                    "device": device_id,
+                    "condition": cond_id,
+                    "questions": questions,
+                    "application": "shop",
+                    "landing_page": "WKFS_NUXT_DE",
+                })
+                data = None
+                for attempt in range(2):
+                    try:
+                        pr = s.post(
+                            "https://wirkaufens.de/trade-in/devices",
+                            data=body,
+                            headers=headers,
+                            timeout=15,
+                        )
+                        if pr.status_code == 200:
+                            data = pr.json()
+                            break
+                    except Exception:
+                        pass
+                if isinstance(data, dict):
+                    price = data.get("price", 0)
+                    if price and price > 0:
+                        result[cond_name] = Decimal(str(price))
+        return result
+
+    def _wirkaufens_browser(self, url: str, functional: bool = True, battery_ok: bool = True) -> dict[str, Decimal]:
+        """Playwright fallback for WirKaufens (used only if the API path fails)."""
         ctx = self._browser.new_context(
             locale="de-DE",
             viewport={"width": 1366, "height": 768},
@@ -527,14 +621,6 @@ class BuybackScraper:
         )
         page = ctx.new_page()
         result: dict[str, Decimal] = {}
-
-        # WirKaufens question IDs (derived from UI inspection):
-        # Q4 = Gerät lässt sich einwandfrei benutzen?
-        # Q2 = Batterie in Ordnung?
-        wkfs_questions = {
-            "4": 1 if functional else 0,
-            "2": 1 if battery_ok else 0,
-        }
 
         # Intercept /trade-in/devices to capture the device ID
         captured: dict[str, Any] = {}
@@ -556,6 +642,13 @@ class BuybackScraper:
             page.evaluate("document.getElementById('cookiescript_accept')?.click()")
             page.wait_for_timeout(800)
 
+            # Dynamic question discovery from the rendered page (question id →
+            # meaning via its code/text; answer values are the page's own
+            # answer ids, Ja=1 / Nein=2).
+            parsed_device_id, wkfs_questions = _wkfs_parse_product(
+                page.content(), functional, battery_ok
+            )
+
             # Trigger one /trade-in/devices call to capture the device ID
             # Always click Ja first to capture the device_id (we override questions manually)
             page.evaluate("""
@@ -570,11 +663,11 @@ class BuybackScraper:
             """)
             page.wait_for_timeout(2000)
 
-            device_id = captured.get("device")
-            # Use our AI-determined question answers, not whatever the page captured
+            device_id = parsed_device_id or captured.get("device")
+            # Use our own assessment answers, not whatever the page captured
             questions = wkfs_questions
 
-            if not device_id:
+            if not device_id or not questions:
                 return result
 
             # Fetch all conditions via the browser's own fetch() (carries session cookies)
@@ -711,6 +804,98 @@ class BuybackScraper:
         except Exception:
             LOGGER.warning("rebuy: scrape failed for %s", url, exc_info=True)
         return result
+
+
+def _wkfs_parse_product(
+    html: str,
+    functional: bool,
+    battery_ok: bool,
+) -> tuple[int | None, dict[str, int]]:
+    """
+    Extract the numeric device id and build the ``questions`` payload for
+    ``POST /trade-in/devices`` from a WirKaufens product page.
+
+    The page is Nuxt SSR; ``__NUXT_DATA__`` is a flat JSON array where object
+    values are indices into the same array. The device object looks like
+    ``{"id": 18503, "name": ..., "questions": [ ... ]}`` and each question is
+    ``{"id": 2, "code": "POWERON_AND_USEABLE", "question": ...,
+    "answers": [{"id": 1, "code": "yes", "text": "Ja"}, ...]}``.
+
+    Question meaning is matched dynamically by code/text (no hardcoded ids):
+      POWERON_AND_USEABLE / "einwandfrei benutzen" → functional
+      BATTERY_CONDITION   / "Batterie/Akku"        → battery_ok
+    Unknown questions default to their "yes" answer. Answer values are the
+    page's own answer ids (Ja=1, Nein=2 — NOT 0/1).
+    """
+    m = re.search(r'<script[^>]*id="__NUXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+    if not m:
+        return None, {}
+    try:
+        data = json.loads(m.group(1))
+    except Exception:
+        return None, {}
+
+    def node(i: Any) -> Any:
+        return data[i] if isinstance(i, int) and 0 <= i < len(data) else None
+
+    # Find the device object: a dict with int "id", str "name" and a
+    # "questions" list — unique to the device payload.
+    device: dict | None = None
+    for entry in data:
+        if (
+            isinstance(entry, dict)
+            and "questions" in entry
+            and "id" in entry
+            and "name" in entry
+            and isinstance(node(entry["id"]), int)
+            and isinstance(node(entry["questions"]), list)
+        ):
+            device = entry
+            break
+    if not device:
+        return None, {}
+
+    device_id = node(device["id"])
+    questions: dict[str, int] = {}
+
+    for qi in node(device["questions"]) or []:
+        q = node(qi)
+        if not isinstance(q, dict):
+            continue
+        qid = node(q.get("id"))
+        if not isinstance(qid, int):
+            continue
+        code = str(node(q.get("code")) or "").upper()
+        text = str(node(q.get("question")) or "").lower()
+
+        if "POWERON" in code or "USEABLE" in code or "benutzen" in text or "funktion" in text:
+            want_yes = functional
+        elif "BATTERY" in code or "akku" in text or "batterie" in text:
+            want_yes = battery_ok
+        else:
+            want_yes = True  # unknown question: assume best case
+
+        yes_id, no_id = None, None
+        for ai in node(q.get("answers")) or []:
+            a = node(ai)
+            if not isinstance(a, dict):
+                continue
+            a_code = str(node(a.get("code")) or "").lower()
+            a_text = str(node(a.get("text")) or "").lower()
+            a_id = node(a.get("id"))
+            if not isinstance(a_id, int):
+                continue
+            if a_code == "yes" or a_text == "ja":
+                yes_id = a_id
+            elif a_code == "no" or a_text == "nein":
+                no_id = a_id
+        answer = yes_id if want_yes else no_id
+        if answer is None:
+            answer = yes_id if yes_id is not None else no_id
+        if answer is not None:
+            questions[str(qid)] = answer
+
+    return device_id, questions
 
 
 def _zoxs_build_questions(
