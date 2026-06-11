@@ -828,30 +828,77 @@ def _fetch_ebay_images(url: str) -> list[str]:
         return []
 
 
+_ka_sess = None
+_ka_sess_lock = __import__("threading").Lock()
+
+
+def _ka_session():
+    """Shared keep-alive curl_cffi session for Kleinanzeigen (fewer handshakes)."""
+    global _ka_sess
+    with _ka_sess_lock:
+        if _ka_sess is None:
+            from curl_cffi.requests import Session as CurlSession
+            _ka_sess = CurlSession(impersonate="chrome120")
+        return _ka_sess
+
+
+def _ka_reset_session():
+    global _ka_sess
+    with _ka_sess_lock:
+        try:
+            if _ka_sess is not None:
+                _ka_sess.close()
+        except Exception:
+            pass
+        _ka_sess = None
+
+
 def _fetch_ka_details(url: str) -> tuple[list[str], str]:
-    """Fetch Kleinanzeigen listing images + description. Returns (images, description)."""
-    try:
-        from curl_cffi.requests import Session as CurlSession
-        from bs4 import BeautifulSoup
-        with CurlSession(impersonate="chrome120") as s:
+    """Fetch Kleinanzeigen listing images + description. Returns (images, description).
+
+    Kleinanzeigen has no anonymous JSON API (the app gateway is auth-gated), so
+    this parses the page HTML. It is hardened with a shared keep-alive session,
+    one retry, and a JSON-LD ImageObject fallback for images.
+    """
+    from bs4 import BeautifulSoup
+    import json as _json
+
+    last_err: Exception | None = None
+    for attempt in range(2):
+        try:
+            s = _ka_session()
             r = s.get(url, headers={"Accept-Language": "de-DE,de;q=0.9"}, timeout=12)
-        soup = BeautifulSoup(r.text, "html.parser")
-        imgs = []
-        for img in soup.find_all("img"):
-            src = img.get("src") or img.get("data-src", "")
-            if "img.kleinanzeigen" in src or "ebayimg" in src:
-                imgs.append(_to_hires(src))
-        og = soup.find("meta", property="og:image")
-        if og and og.get("content"):
-            imgs.insert(0, _to_hires(og["content"]))
-        # Extract description
-        desc_el = soup.find(id="viewad-description-text")
-        description = desc_el.get_text(" ", strip=True) if desc_el else ""
-        return imgs, description
-    except Exception as e:
+            soup = BeautifulSoup(r.text, "html.parser")
+            imgs = []
+            for img in soup.find_all("img"):
+                src = img.get("src") or img.get("data-src", "")
+                if "img.kleinanzeigen" in src or "ebayimg" in src:
+                    imgs.append(_to_hires(src))
+            og = soup.find("meta", property="og:image")
+            if og and og.get("content"):
+                imgs.insert(0, _to_hires(og["content"]))
+            # Fallback: JSON-LD ImageObject blocks carry reliable contentUrls
+            if not imgs:
+                for blk in re.findall(r'<script type="application/ld\+json">(.*?)</script>', r.text, re.S):
+                    try:
+                        d = _json.loads(blk)
+                    except Exception:
+                        continue
+                    if isinstance(d, dict) and d.get("@type") == "ImageObject" and d.get("contentUrl"):
+                        imgs.append(_to_hires(d["contentUrl"]))
+            desc_el = soup.find(id="viewad-description-text")
+            description = desc_el.get_text(" ", strip=True) if desc_el else ""
+            # Deduplicate images, keep order
+            imgs = list(dict.fromkeys(imgs))
+            if imgs or description:
+                return imgs, description
+        except Exception as e:
+            last_err = e
+            _ka_reset_session()
+    if last_err is not None:
         import logging
-        logging.getLogger("condition_detect").warning("KA detail fetch failed for %s: %r", url[-50:], e)
-        return [], ""
+        logging.getLogger("condition_detect").warning("KA detail fetch failed for %s: %r", url[-50:], last_err)
+    return [], ""
 
 
 def _fetch_ka_images(url: str) -> list[str]:
