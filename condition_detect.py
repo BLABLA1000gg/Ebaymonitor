@@ -529,6 +529,17 @@ _PATTERNS: list[tuple[int, list[str]]] = [
         # Italian (IT) — Vinted listings
         "non funziona", "schermo rotto", "vetro rotto", "rotto dietro",
         "non si accende", "display rotto",
+        # Console defects — Nintendo Switch
+        "joy-con drift", "stick driftet", "stick drift", "joy-con defekt",
+        "lässt sich nicht laden",
+        # Console defects — PlayStation
+        "liest keine discs", "laufwerk defekt", "laufwerkfehler", "kein bild",
+        "überhitzt", "ce-34878",
+        # Console defects — Xbox
+        "disc lesefehler", "rrod", "e68",
+        # iPad / tablet defects
+        "displaybruch", "touch funktioniert nicht", "face id defekt",
+        "touch id defekt", "home button defekt", "akku defekt", "akku tauschen",
         # "riss", "bruch", "gebrochen" removed — too many false positives with "kein Riss" etc.
         # The AI handles these ambiguous cases correctly
     ]),

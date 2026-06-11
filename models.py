@@ -15,6 +15,12 @@ class Listing:
     condition: str | None = None
     shipping: str | None = None
     location: str | None = None
+    # Auction metadata (eBay). Populated only for auction listings; BIN
+    # listings keep the defaults below so existing constructors stay valid.
+    is_auction: bool = False
+    bid_count: int | None = None
+    time_left: str | None = None
+    end_time: str | None = None
 
 
 class EventType(str, Enum):

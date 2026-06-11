@@ -14,7 +14,7 @@ from bs4 import BeautifulSoup
 
 from browser_fetch import BrowserFetcher
 from filters import ListingFilter, parse_csv_words, parse_price
-from marketplaces import fetch_marketplace_listings, marketplace_for_url
+from marketplaces import fetch_marketplace_listings, marketplace_for_url, parse_ebay_auction_fields
 from models import EventType, Listing, ListingEvent
 from storage import MonitorStore
 
@@ -128,6 +128,7 @@ def parse_listings(html: str) -> list[Listing]:
                 break
 
         price, currency = parse_price(price_text)
+        auction = parse_ebay_auction_fields(li)
         listings.append(
             Listing(
                 title=title,
@@ -138,6 +139,7 @@ def parse_listings(html: str) -> list[Listing]:
                 image_url=image_url,
                 condition=condition,
                 shipping=shipping,
+                **auction,
             )
         )
     return listings

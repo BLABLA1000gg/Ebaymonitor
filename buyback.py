@@ -48,6 +48,14 @@ ZOXS_CONDITIONS = {
     "65": "Stark gebraucht",
 }
 
+# rebuy grade labels (best→worst). A0/Neu is not offered for used Ankauf.
+REBUY_CONDITIONS = {
+    "A1": "Wie neu",
+    "A2": "Sehr gut",
+    "A3": "Gut",
+    "A4": "Stark genutzt",
+}
+
 # WirKaufens condition IDs (best→worst)
 WKFS_CONDITIONS = {
     5: "Neu",
@@ -478,6 +486,100 @@ class BuybackScraper:
 
         finally:
             ctx.close()
+        return result
+
+
+    # ------------------------------------------------------------------ #
+    # rebuy – Ankaufpreise (what rebuy pays you, per grade A1–A4)         #
+    # URL: https://www.rebuy.de/verkaufen/<category>/<slug>_<productId>   #
+    # ------------------------------------------------------------------ #
+
+    def rebuy(
+        self,
+        url: str,
+        functional: bool = True,
+        battery_ok: bool = True,
+        has_box: bool = False,
+        has_cable: bool = False,
+    ) -> dict[str, Decimal]:
+        """
+        Scrape rebuy.de Ankaufpreise for all condition grades of a product.
+
+        rebuy's sell page is Angular SSR: the rendered HTML already embeds a
+        product JSON blob with ``"variants": [{"label": "A1", "purchasePrice":
+        <cents>}, ...]`` — the exact instant Ankaufpreis per grade that the
+        6-step wizard would converge to. So no browser is needed; a curl_cffi
+        chrome120-impersonated GET is enough (the Playwright browser from the
+        context manager is unused here, which is fine).
+
+        Grades: A1 = Wie neu, A2 = Sehr gut, A3 = Gut, A4 = Stark genutzt.
+
+        Assessment parameters:
+          functional  → False: rebuy's instant grade table only applies to
+                        fully working devices ("Funktioniert ohne
+                        Einschränkungen? Ja"); defective devices go through a
+                        separate repair-quote flow → return {}.
+          battery_ok  → False: a degraded battery disqualifies the top grades
+                        in the wizard → drop "Wie neu" and "Sehr gut".
+          has_box / has_cable: accepted for signature parity; rebuy pays no
+                        accessory bonus, prices are unaffected.
+
+        Returns {condition_label: price} for grades with price > 0.
+        """
+        result: dict[str, Decimal] = {}
+        if not functional:
+            return result
+
+        m = re.search(r"_(\d+)$", url.rstrip("/"))
+        product_id = m.group(1) if m else None
+
+        try:
+            from curl_cffi.requests import Session as CurlSession
+
+            headers = {
+                "Accept": "text/html,*/*;q=0.8",
+                "Accept-Language": "de-DE,de;q=0.9",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Referer": "https://www.rebuy.de/verkaufen",
+            }
+            with CurlSession(impersonate="chrome120") as s:
+                r = s.get(url, headers=headers, timeout=20)
+            html = r.text
+
+            # Find the variants array belonging to THIS product (the page can
+            # embed cross-sell products too). Variants arrays contain only flat
+            # objects, so they never include a ']' character.
+            variants: list[dict] | None = None
+            for vm in re.finditer(r'"variants":(\[[^\]]*\])', html):
+                window = html[max(0, vm.start() - 800): vm.end() + 800]
+                if product_id is None or product_id in window:
+                    try:
+                        candidate = json.loads(vm.group(1))
+                    except Exception:
+                        continue
+                    if candidate and isinstance(candidate, list):
+                        variants = candidate
+                        break
+
+            if not variants:
+                LOGGER.warning("rebuy: no variant price data found at %s", url)
+                return result
+
+            for v in variants:
+                label = REBUY_CONDITIONS.get(str(v.get("label", "")))
+                if not label:
+                    continue
+                if not battery_ok and label in ("Wie neu", "Sehr gut"):
+                    continue
+                cents = v.get("purchasePrice") or 0
+                if cents and cents > 0:
+                    result[label] = Decimal(str(cents)) / Decimal("100")
+
+        except Exception:
+            LOGGER.warning("rebuy: scrape failed for %s", url, exc_info=True)
         return result
 
 

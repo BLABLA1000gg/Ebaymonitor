@@ -246,6 +246,84 @@ def _zoxs_category_urls(q_lower: str) -> list[str]:
 
 
 # ------------------------------------------------------------------ #
+# rebuy – Ankauf product search (server-side rendered search page)   #
+# ------------------------------------------------------------------ #
+
+def search_rebuy(query: str) -> list[dict]:
+    """
+    Search rebuy.de Ankauf (Verkaufen) products.
+    Returns [{name, url}] where url is a /verkaufen/<cat>/<slug>_<id> sell page.
+
+    The /verkaufen/suche page is server-side rendered (Angular SSR), so a
+    plain curl_cffi GET returns the full product list — no browser needed.
+    """
+    key = f"rebuy:{query.lower()}"
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+
+    try:
+        from curl_cffi.requests import Session as CurlSession
+        from bs4 import BeautifulSoup
+
+        headers = {
+            "Accept": "text/html,*/*;q=0.8",
+            "Accept-Language": "de-DE,de;q=0.9",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Referer": "https://www.rebuy.de/verkaufen",
+        }
+
+        with CurlSession(impersonate="chrome120") as s:
+            r = s.get(
+                "https://www.rebuy.de/verkaufen/suche",
+                params={"query": query},
+                headers=headers,
+                timeout=15,
+            )
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # Word matching like search_zoxs: numbers need boundaries so "12"
+        # doesn't match inside "128GB"; normalize "128 GB" == "128gb".
+        q_lower = query.lower()
+        q_words = [w for w in re.split(r"\s+", q_lower) if len(w) >= 2]
+
+        def _norm(s: str) -> str:
+            return re.sub(r"(\d)\s+(gb|tb)", r"\1\2", s.lower())
+
+        def _word_matches(name: str) -> bool:
+            nl = _norm(name)
+            for w in q_words:
+                wn = _norm(w)
+                if wn.isdigit():
+                    if not re.search(r"(?<!\d)" + re.escape(wn) + r"(?!\d)", nl):
+                        return False
+                elif re.fullmatch(r"\d+(gb|tb)", wn):
+                    m = re.match(r"(\d+)(gb|tb)", wn)
+                    if not re.search(r"(?<!\d)" + m.group(1) + m.group(2), nl):
+                        return False
+                elif wn not in nl:
+                    return False
+            return True
+
+        results: list[dict] = []
+        seen: set[str] = set()
+        for a in soup.find_all("a", href=re.compile(r"^/verkaufen/[a-z0-9\-]+/[^/]+_\d+$")):
+            href = a["href"]
+            name = a.get_text(" ", strip=True)
+            if not name or href in seen:
+                continue
+            seen.add(href)
+            if _word_matches(name):
+                results.append({"name": name, "url": f"https://www.rebuy.de{href}"})
+
+        return _store(key, results[:10])
+
+    except Exception:
+        return []
+
+
+# ------------------------------------------------------------------ #
 # Clevertronic – search trade-in (Ankauf) product pages              #
 # ------------------------------------------------------------------ #
 

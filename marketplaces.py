@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 import threading
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
@@ -40,6 +41,69 @@ def marketplace_for_url(url: str) -> Marketplace:
 def _text(element, selector: str) -> str | None:
     selected = element.select_one(selector)
     return selected.get_text(" ", strip=True) if selected else None
+
+
+# Matches "3 Gebote" / "1 Gebot" (DE) and "3 bids" / "1 bid" (EN) in an
+# eBay search-result card. The bid count is the strongest auction signal.
+_EBAY_BID_RE = re.compile(r"(\d+)\s+(?:Gebot(?:e)?|bids?)\b", re.IGNORECASE)
+
+
+def parse_ebay_auction_fields(li) -> dict:
+    """
+    Inspect a single eBay search-result card (``<li class="s-card">`` element,
+    a BeautifulSoup tag) and extract auction metadata.
+
+    Returns a dict with keys ``is_auction``, ``bid_count``, ``time_left`` and
+    ``end_time``. For Buy-It-Now (non-auction) cards it returns
+    ``{"is_auction": False, ...}`` with the other values ``None`` so callers can
+    splat it straight into the ``Listing`` constructor.
+
+    Detection (robust, two independent signals — either one marks an auction):
+      * a bid-count badge ("X Gebote" / "X bids"), OR
+      * a time-left element (``.s-card__time-left`` / ``.s-card__time``) which
+        eBay only renders for timed auctions, not BIN listings.
+
+    The current bid for an auction is the card's price span (eBay shows the
+    leading bid as the price on auction cards), so price parsing in the caller
+    is unchanged — the price already reflects the current bid.
+    """
+    bid_count: int | None = None
+    # Bid count: scan the small/secondary text spans for an "X Gebote" badge.
+    for sp in li.select("span.su-styled-text, span"):
+        txt = sp.get_text(" ", strip=True)
+        if not txt or len(txt) > 24:
+            continue
+        match = _EBAY_BID_RE.search(txt)
+        if match:
+            bid_count = int(match.group(1))
+            break
+
+    # Time-left ("Noch 22 Min", "Noch 1 T 10 Std") and end-time.
+    time_left = None
+    end_time = None
+    time_left_el = li.select_one(".s-card__time-left")
+    if time_left_el:
+        time_left = time_left_el.get_text(" ", strip=True) or None
+    time_el = li.select_one(".s-card__time")
+    if time_el:
+        time_full = time_el.get_text(" ", strip=True)
+        # Format: "Restzeit Noch 22 Min (Heute 15:33)" — the (...) is the end time.
+        paren = re.search(r"\(([^)]+)\)", time_full)
+        if paren:
+            end_time = paren.group(1).strip()
+        if time_left is None:
+            # Fall back to the "Noch ..." fragment if the dedicated element is absent.
+            noch = re.search(r"(Noch\b.*?)(?:\s*\(|$)", time_full)
+            if noch:
+                time_left = noch.group(1).strip()
+
+    is_auction = bid_count is not None or time_left is not None or end_time is not None
+    return {
+        "is_auction": is_auction,
+        "bid_count": bid_count,
+        "time_left": time_left,
+        "end_time": end_time,
+    }
 
 
 def parse_kleinanzeigen_listings(html: str) -> list[Listing]:

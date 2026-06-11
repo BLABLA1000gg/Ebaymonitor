@@ -30,15 +30,16 @@ from storage import MonitorStore
 
 LOGGER = logging.getLogger(__name__)
 
-# Realistic phone storage tiers — anything else is a misparse (model number,
-# battery percentage, etc.) and must not be treated as a storage size.
-_VALID_GB = {16, 32, 64, 128, 256, 512, 1024}
+# Realistic storage tiers across supported categories (phones, iPads, consoles)
+# — anything else is a misparse (model number, battery %, etc.). PS5 = 825GB,
+# Xbox/PS = 1/2TB, iPad up to 2TB.
+_VALID_GB = {16, 32, 64, 128, 256, 512, 825, 1000, 1024, 2048}
 
 
 def _gb_candidates(text: str) -> list[int]:
     t = text.lower()
     found: list[int] = []
-    for m in re.finditer(r'\b(\d)\s*tb\b', t):
+    for m in re.finditer(r'\b(\d{1,2})\s*tb\b', t):
         gb = int(m.group(1)) * 1024
         if gb in _VALID_GB:
             found.append(gb)
@@ -562,11 +563,44 @@ def scan_profiles(
 
 
 def _no_auctions(url: str) -> str:
-    """Append LH_BIN=1 to eBay URLs to exclude auction listings."""
+    """Append LH_BIN=1 to eBay URLs to exclude auctions — UNLESS the user
+    opted into auction-sniper mode by putting LH_Auction=1 in the profile URL
+    (then we leave it untouched so auctions are scanned)."""
+    if "ebay.de" in url and "LH_Auction=1" in url:
+        return url  # sniper profile — keep auctions
     if "ebay.de" in url and "LH_BIN" not in url:
         sep = "&" if "?" in url else "?"
         return url + sep + "LH_BIN=1"
     return url
+
+
+def _ending_soonest_auctions(url: str) -> str:
+    """Build an ending-soonest eBay auction URL (sniper mode):
+    LH_Auction=1 (auctions only) + _sop=1 (sort by time: ending soonest).
+    Drops the LH_BIN-only filter. Non-eBay URLs pass through unchanged.
+    """
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    if "ebay.de" not in url and "ebay.com" not in url:
+        return url
+    parts = list(urlsplit(url))
+    query = dict(parse_qsl(parts[3], keep_blank_values=True))
+    query.pop("LH_BIN", None)
+    query["LH_Auction"] = "1"
+    query["_sop"] = "1"
+    parts[3] = urlencode(query)
+    return urlunsplit(parts)
+
+
+def _auction_ends_within_2h(time_left: str | None) -> bool:
+    """True if an eBay auction's time-left string indicates < 2 hours remain.
+    Examples: 'Noch 22 Min' → True, 'Noch 1 Std 5 Min' → True,
+    'Noch 1 T 10 Std' → False (contains days)."""
+    if not time_left:
+        return False
+    if re.search(r"\bT\b|\bTag", time_left):  # days remain
+        return False
+    h = re.search(r"(\d+)\s*Std", time_left)
+    return not h or int(h.group(1)) < 2
 
 
 def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wirkaufens_prices) -> int | None:
