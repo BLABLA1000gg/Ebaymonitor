@@ -78,6 +78,14 @@ def parse_listings(html: str) -> list[Listing]:
         if "ebay.com/itm/" in link and "ebay.de/itm/" not in link:
             continue
 
+        # Fallback dedup by the /itm/<id> in the link — eBay renders each
+        # physical listing in ~3 s-card elements and data-listingid is not
+        # always present, so the attribute check alone leaks duplicates.
+        m_itm = re.search(r"/itm/(\d+)", link)
+        item_key = listing_id or (m_itm.group(1) if m_itm else "")
+        if item_key and item_key in seen_ids:
+            continue
+
         # Title: first primary-default styled span, or fall back to image alt
         title_span = li.select_one("span.su-styled-text.primary.default")
         img_el = li.find("img", class_="s-card__image")
@@ -103,8 +111,8 @@ def parse_listings(html: str) -> list[Listing]:
         if title.casefold() in ("shop on ebay", ""):
             continue
 
-        if listing_id:
-            seen_ids.add(listing_id)
+        if item_key:
+            seen_ids.add(item_key)
 
         # Image
         image_url = None
