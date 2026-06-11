@@ -203,17 +203,38 @@ def scan_profiles(
                 "%s: Legacy-Ankauf-URLs aktiv — KEINE Speichergrößen-Prüfung "
                 "pro Listing. Für Blindkäufe Plattform-Checkboxen verwenden.",
                 profile.name)
-            try:
+            def _legacy_scrape(label, fn, url):
                 with BuybackScraper() as bs:
-                    if profile.clevertronic_url:
-                        ct_prices = {k: str(v) for k, v in bs.clevertronic(profile.clevertronic_url).items()}
-                        LOGGER.info("%s: Clevertronic prices: %s", profile.name, ct_prices)
-                    if profile.zoxs_url:
-                        zoxs_prices = {k: str(v) for k, v in bs.zoxs(profile.zoxs_url).items()}
-                        LOGGER.info("%s: ZOXS Ankaufpreise: %s", profile.name, zoxs_prices)
-                    if profile.wirkaufens_url:
-                        wirkaufens_prices = {k: str(v) for k, v in bs.wirkaufens(profile.wirkaufens_url).items()}
-                        LOGGER.info("%s: WirKaufens Ankaufpreise: %s", profile.name, wirkaufens_prices)
+                    return label, {k: str(v) for k, v in fn(bs, url).items()}
+
+            legacy_tasks = []
+            if profile.clevertronic_url:
+                legacy_tasks.append(("clevertronic",
+                    lambda bs, u: bs.clevertronic(u), profile.clevertronic_url))
+            if profile.zoxs_url:
+                legacy_tasks.append(("zoxs",
+                    lambda bs, u: bs.zoxs(u), profile.zoxs_url))
+            if profile.wirkaufens_url:
+                legacy_tasks.append(("wirkaufens",
+                    lambda bs, u: bs.wirkaufens(u), profile.wirkaufens_url))
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(legacy_tasks) or 1) as ex:
+                    futs = [ex.submit(_legacy_scrape, lbl, fn, url)
+                            for lbl, fn, url in legacy_tasks]
+                    for f in concurrent.futures.as_completed(futs):
+                        try:
+                            label, prices = f.result(timeout=45)
+                            if label == "clevertronic":
+                                ct_prices = prices
+                                LOGGER.info("%s: Clevertronic prices: %s", profile.name, prices)
+                            elif label == "zoxs":
+                                zoxs_prices = prices
+                                LOGGER.info("%s: ZOXS Ankaufpreise: %s", profile.name, prices)
+                            elif label == "wirkaufens":
+                                wirkaufens_prices = prices
+                                LOGGER.info("%s: WirKaufens Ankaufpreise: %s", profile.name, prices)
+                        except Exception as err:
+                            LOGGER.warning("%s: Legacy buyback fetch failed: %s", profile.name, err)
             except Exception as err:
                 LOGGER.warning("%s: Buyback fetch failed: %s", profile.name, err)
 
@@ -679,7 +700,7 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
         "rebuy": search_rebuy,
     }
     platform_results: dict[str, list[dict]] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
         futures = {
             platform: ex.submit(search_fns[platform], refined_query)
             for platform in platforms if platform in search_fns
@@ -701,26 +722,35 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
         "wirkaufens": lambda bs, url: bs.wirkaufens(url, functional=True, battery_ok=True),
         "rebuy": lambda bs, url: bs.rebuy(url, functional=True, battery_ok=True),
     }
+    # Build all (gb, platform) scrape tasks upfront, then run them all in parallel.
+    # Each call creates its own CurlSession internally so concurrent calls are safe.
+    scrape_tasks: list[tuple[int, str, str, str]] = []  # (gb, platform, url, name)
+    for gb in target_gbs:
+        for platform in platforms:
+            products = platform_results.get(platform) or []
+            best = _best_match(products, gb, base_keyword)
+            if best:
+                scrape_tasks.append((gb, platform, best["url"], best["name"]))
+
+    def _scrape_one(task: tuple) -> tuple:
+        gb, platform, url, name = task
+        with BuybackScraper() as bs:
+            prices = scrape_fns[platform](bs, url)
+        return gb, platform, name, {k: str(v) for k, v in prices.items()} if prices else {}
+
     by_gb: dict[int, dict[str, dict]] = {}
-    with BuybackScraper() as bs:
-        for gb in target_gbs:
-            gb_prices: dict[str, dict] = {}
-            for platform in platforms:
-                products = platform_results.get(platform) or []
-                best = _best_match(products, gb, base_keyword)
-                if not best:
-                    continue
-                try:
-                    prices = scrape_fns[platform](bs, best["url"])
-                    if prices:
-                        gb_prices[platform] = {k: str(v) for k, v in prices.items()}
-                        LOGGER.info("%s: %s %sGB [%s]: %s", profile.name,
-                                    platform, gb, best["name"], gb_prices[platform])
-                except Exception as err:
-                    LOGGER.warning("%s: %s scrape failed (%sGB): %s",
-                                   profile.name, platform, gb, err)
-            if gb_prices:
-                by_gb[gb] = gb_prices
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(scrape_tasks) or 1, 8)) as ex:
+        futures = {ex.submit(_scrape_one, task): task for task in scrape_tasks}
+        for future in concurrent.futures.as_completed(futures):
+            task = futures[future]
+            gb, platform = task[0], task[1]
+            try:
+                _, _, name, prices = future.result(timeout=45)
+                if prices:
+                    by_gb.setdefault(gb, {})[platform] = prices
+                    LOGGER.info("%s: %s %sGB [%s]: %s", profile.name, platform, gb, name, prices)
+            except Exception as err:
+                LOGGER.warning("%s: %s scrape failed (%sGB): %s", profile.name, platform, gb, err)
 
     # Profile-level price display uses the dominant variant
     dom = by_gb.get(dominant_gb, {})
