@@ -220,7 +220,137 @@ class BuybackScraper:
           has_cable   → "Original Kabel?"         (Ja/Nein)
 
         Returns {condition_name: ankaufpreis} for conditions with price > 0.
+
+        Implementation: no browser needed. ZOXS's product page is static HTML
+        that embeds the articleId, all condition ids and all question inputs;
+        the price endpoint ``/sys_article_price.php`` accepts a plain JSON
+        POST when the request is TLS-impersonated (curl_cffi chrome120) and
+        carries the cookies from a prior GET of the product page. One GET +
+        one POST per condition replaces the old full-browser flow.
         """
+        result: dict[str, Decimal] = {}
+        try:
+            result = self._zoxs_api(url, functional, battery_ok, has_box, has_cable)
+        except Exception:
+            LOGGER.warning("ZOXS: API scrape failed for %s — falling back to browser", url, exc_info=True)
+        if result:
+            return result
+        try:
+            return self._zoxs_browser(url, functional, battery_ok, has_box, has_cable)
+        except Exception:
+            LOGGER.warning("ZOXS: browser fallback failed for %s", url, exc_info=True)
+            return {}
+
+    def _zoxs_api(
+        self,
+        url: str,
+        functional: bool,
+        battery_ok: bool,
+        has_box: bool,
+        has_cable: bool,
+    ) -> dict[str, Decimal]:
+        """Direct JSON-API scrape of ZOXS Ankaufpreise (no browser)."""
+        from curl_cffi.requests import Session as CurlSession
+
+        ua = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        result: dict[str, Decimal] = {}
+        with CurlSession(impersonate="chrome120") as s:
+            html = ""
+            for attempt in range(2):
+                try:
+                    r = s.get(
+                        url,
+                        headers={
+                            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                            "Accept-Language": "de-DE,de;q=0.9",
+                            "User-Agent": ua,
+                        },
+                        timeout=20,
+                    )
+                    if r.status_code == 200 and 'data-articleid="' in r.text:
+                        html = r.text
+                        break
+                except Exception:
+                    if attempt == 1:
+                        raise
+            if not html:
+                return result
+
+            m = re.search(r'data-articleid="(\d+)"', html)
+            if not m:
+                return result
+            article_id = int(m.group(1))
+
+            soup = BeautifulSoup(html, "html.parser")
+
+            # Conditions from the static condition selector
+            seen_ids: set[str] = set()
+            conditions: list[tuple[str, str]] = []
+            for el in soup.find_all("div", class_="conditionLabel"):
+                cid = el.get("data-conditionid", "")
+                name = el.get("data-frontendname", "")
+                if cid and cid not in seen_ids and name and name not in ZOXS_SKIP_CONDITIONS:
+                    seen_ids.add(cid)
+                    conditions.append((cid, name))
+            if not conditions:
+                return result
+
+            # Build the questions payload exactly like the page's own JS:
+            # every radio question defaults to "Ja" (true), selects take an
+            # option value. Then inject the caller's assessment answers by
+            # matching each question's on-page text.
+            questions = _zoxs_build_questions(soup, functional, battery_ok, has_box, has_cable)
+            if not questions:
+                return result
+
+            headers = {
+                "Content-Type": "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "User-Agent": ua,
+                "Referer": url,
+                "Origin": "https://www.zoxs.de",
+            }
+            for cid, name in conditions:
+                body = json.dumps({
+                    "articleId": article_id,
+                    "condition": int(cid),
+                    "buyback": False,
+                    "questions": questions,
+                    "zoxsCheck": False,
+                })
+                data = None
+                for attempt in range(2):
+                    try:
+                        pr = s.post(
+                            "https://www.zoxs.de/sys_article_price.php",
+                            data=body,
+                            headers=headers,
+                            timeout=15,
+                        )
+                        if pr.status_code == 200:
+                            data = pr.json()
+                            break
+                    except Exception:
+                        pass
+                if isinstance(data, dict):
+                    raw = data.get("priceRaw", 0)
+                    if raw and raw > 0:
+                        result[name] = Decimal(str(raw))
+        return result
+
+    def _zoxs_browser(
+        self,
+        url: str,
+        functional: bool = True,
+        battery_ok: bool = True,
+        has_box: bool = False,
+        has_cable: bool = False,
+    ) -> dict[str, Decimal]:
+        """Playwright fallback for ZOXS (used only if the direct API path fails)."""
         ctx = self._browser.new_context(
             locale="de-DE",
             viewport={"width": 1366, "height": 768},
@@ -581,6 +711,64 @@ class BuybackScraper:
         except Exception:
             LOGGER.warning("rebuy: scrape failed for %s", url, exc_info=True)
         return result
+
+
+def _zoxs_build_questions(
+    soup: BeautifulSoup,
+    functional: bool,
+    battery_ok: bool,
+    has_box: bool,
+    has_cable: bool,
+) -> list[dict]:
+    """
+    Build the ``questions`` payload for sys_article_price.php from the static
+    product-page HTML, mirroring the page's own JS: every yes/no radio
+    defaults to "Ja" (true), selects take an option value. Assessment answers
+    are injected by matching each question's on-page text.
+    """
+    questions: list[dict] = []
+    seen: set[str] = set()
+
+    for el in soup.find_all(["input", "select"]):
+        name = el.get("name", "")
+        m = re.fullmatch(r"questions\[(\d+)\]", name)
+        if not m:
+            continue
+        qid = m.group(1)
+        if qid in seen:
+            continue
+        seen.add(qid)
+
+        label_el = el.find_previous("span", class_="article-question")
+        text = label_el.get_text(" ", strip=True).lower() if label_el else ""
+
+        if el.name == "select":
+            options = [o for o in el.find_all("option") if o.get("value")]
+            if not options:
+                continue
+            # Battery-capacity selects: best option when battery is OK,
+            # worst otherwise. Other selects (e.g. storage) keep the first
+            # (= best/default) option.
+            if any(kw in text for kw in ("akku", "batterie", "battery")) and not battery_ok:
+                choice = options[-1]
+            else:
+                choice = options[0]
+            questions.append({"id": int(qid), "userSelect": choice.get("value")})
+            continue
+
+        # Radio (yes/no) question — default "Ja", override from assessment
+        answer = True
+        if any(kw in text for kw in ("funktionsfähig", "funktionstüchtig", "working", "funktion")):
+            answer = functional
+        elif any(kw in text for kw in ("akku", "batterie", "battery")):
+            answer = battery_ok
+        elif any(kw in text for kw in ("ovp", "originalverpack", "karton")) or "box" in text:
+            answer = has_box
+        elif any(kw in text for kw in ("kabel", "cable", "lightning", "usb")):
+            answer = has_cable
+        questions.append({"id": int(qid), "userSelect": answer})
+
+    return questions
 
 
 def _parse_eur(text: str) -> Decimal | None:
