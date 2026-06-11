@@ -181,6 +181,7 @@ def scan_profiles(
         ct_prices: dict = {}
         zoxs_prices: dict = {}
         wirkaufens_prices: dict = {}
+        rebuy_prices: dict = {}
 
         # --- New flow: platform checkboxes + DeepSeek spec extraction ---
         # buyback_by_gb: {storage_gb: {platform: condition→price}}. Each
@@ -191,7 +192,7 @@ def scan_profiles(
             try:
                 buyback_by_gb = _fetch_buyback_dynamic(
                     profile, active, settings,
-                    ct_prices, zoxs_prices, wirkaufens_prices,
+                    ct_prices, zoxs_prices, wirkaufens_prices, rebuy_prices,
                 )
             except Exception as err:
                 LOGGER.warning("%s: Dynamic buyback fetch failed: %s", profile.name, err)
@@ -221,7 +222,7 @@ def scan_profiles(
 
         # Per-listing condition detection + worth-it scoring
         listing_extras = {}
-        has_buyback = ct_prices or zoxs_prices or wirkaufens_prices
+        has_buyback = ct_prices or zoxs_prices or wirkaufens_prices or rebuy_prices
         if has_buyback:
             provider = settings.ai_provider if settings else "none"
             api_key = (settings.nvidia_api_key if provider == "nvidia"
@@ -457,7 +458,8 @@ def scan_profiles(
                     # table matching this listing's size; no table for its size
                     # (or size unknown) → skip. Pricing a 128GB phone with
                     # 256GB buyback prices would inflate profit by €20-80.
-                    item_ct, item_zoxs, item_wkfs = ct_prices, zoxs_prices, wirkaufens_prices
+                    item_ct, item_zoxs, item_wkfs, item_rebuy = (
+                        ct_prices, zoxs_prices, wirkaufens_prices, rebuy_prices)
                     if buyback_by_gb:
                         listing_gb = _extract_listing_gb(item_desc, title=item.title)
                         gb_prices = buyback_by_gb.get(listing_gb) if listing_gb else None
@@ -471,6 +473,7 @@ def scan_profiles(
                         item_ct = gb_prices.get("clevertronic", {})
                         item_zoxs = gb_prices.get("zoxs", {})
                         item_wkfs = gb_prices.get("wirkaufens", {})
+                        item_rebuy = gb_prices.get("rebuy", {})
 
                     # ── Displayed condition: AI is the source of truth ───────
                     # Pricing uses fixed conservative tiers regardless of this
@@ -497,6 +500,7 @@ def scan_profiles(
                         zoxs_prices=item_zoxs or None,
                         wkfs_prices=item_wkfs or None,
                         clevertronic_prices=item_ct or None,
+                        rebuy_prices=item_rebuy or None,
                         shipping_cost=ship,
                         fee_rate=fee,
                         title=item.title,
@@ -530,7 +534,7 @@ def scan_profiles(
                                        "condition_profit": None, "condition_roi": None}
 
             # 3 workers: safe for NVIDIA free-tier rate limits (avoids 429 errors)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
                 futures = {
                     ex.submit(_assess_item, item, assessments[i]): item
                     for i, item in enumerate(active)
@@ -603,7 +607,7 @@ def _auction_ends_within_2h(time_left: str | None) -> bool:
     return not h or int(h.group(1)) < 2
 
 
-def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wirkaufens_prices) -> int | None:
+def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wirkaufens_prices, rebuy_prices) -> int | None:
     """
     Dynamic buyback price fetch using platform checkboxes + DeepSeek spec extraction.
 
@@ -621,7 +625,8 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
     The dominant storage size's prices are additionally copied into the passed
     ct_prices/zoxs_prices/wirkaufens_prices dicts (profile-level display).
     """
-    from buyback_search import search_zoxs, search_wirkaufens, search_clevertronic
+    from buyback_search import (search_zoxs, search_wirkaufens, search_clevertronic,
+                                search_rebuy)
     from deepseek_extract import extract_specs_batch, build_search_query
 
     base_keyword = profile.ebay_search_keyword or profile.include_keywords
@@ -671,6 +676,7 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
         "zoxs": search_zoxs,
         "wirkaufens": search_wirkaufens,
         "clevertronic": search_clevertronic,
+        "rebuy": search_rebuy,
     }
     platform_results: dict[str, list[dict]] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
@@ -693,6 +699,7 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
         "zoxs": lambda bs, url: bs.zoxs(url, functional=True, battery_ok=True,
                                         has_box=False, has_cable=False),
         "wirkaufens": lambda bs, url: bs.wirkaufens(url, functional=True, battery_ok=True),
+        "rebuy": lambda bs, url: bs.rebuy(url, functional=True, battery_ok=True),
     }
     by_gb: dict[int, dict[str, dict]] = {}
     with BuybackScraper() as bs:
@@ -720,6 +727,7 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
     ct_prices.update(dom.get("clevertronic", {}))
     zoxs_prices.update(dom.get("zoxs", {}))
     wirkaufens_prices.update(dom.get("wirkaufens", {}))
+    rebuy_prices.update(dom.get("rebuy", {}))
 
     return by_gb
 

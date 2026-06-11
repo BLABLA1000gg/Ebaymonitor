@@ -246,16 +246,18 @@ def _zoxs_category_urls(q_lower: str) -> list[str]:
 
 
 # ------------------------------------------------------------------ #
-# rebuy – Ankauf product search (server-side rendered search page)   #
+# rebuy – Ankauf product search (smart-suggestions JSON API)         #
 # ------------------------------------------------------------------ #
 
 def search_rebuy(query: str) -> list[dict]:
     """
     Search rebuy.de Ankauf (Verkaufen) products.
-    Returns [{name, url}] where url is a /verkaufen/<cat>/<slug>_<id> sell page.
+    Returns [{name, url}] where url is a /verkaufen/p/<slug>_<id> sell page.
 
-    The /verkaufen/suche page is server-side rendered (Angular SSR), so a
-    plain curl_cffi GET returns the full product list — no browser needed.
+    The Angular sell app queries
+      GET https://www.rebuy.de/verkaufen/api/search/smart-suggestions?q=<query>
+    which returns {"products": [{"id", "name", "variants": [...]}, ...]}.
+    A curl_cffi chrome120 GET works without cookies — no browser needed.
     """
     key = f"rebuy:{query.lower()}"
     cached = _cached(key)
@@ -264,24 +266,22 @@ def search_rebuy(query: str) -> list[dict]:
 
     try:
         from curl_cffi.requests import Session as CurlSession
-        from bs4 import BeautifulSoup
 
         headers = {
-            "Accept": "text/html,*/*;q=0.8",
+            "Accept": "application/json, text/plain, */*",
             "Accept-Language": "de-DE,de;q=0.9",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "X-Requested-With": "XMLHttpRequest",
             "Referer": "https://www.rebuy.de/verkaufen",
         }
 
         with CurlSession(impersonate="chrome120") as s:
             r = s.get(
-                "https://www.rebuy.de/verkaufen/suche",
-                params={"query": query},
+                "https://www.rebuy.de/verkaufen/api/search/smart-suggestions",
+                params={"q": query},
                 headers=headers,
                 timeout=15,
             )
-
-        soup = BeautifulSoup(r.text, "html.parser")
+        data = r.json()
 
         # Word matching like search_zoxs: numbers need boundaries so "12"
         # doesn't match inside "128GB"; normalize "128 GB" == "128gb".
@@ -306,16 +306,25 @@ def search_rebuy(query: str) -> list[dict]:
                     return False
             return True
 
+        def _slugify(name: str) -> str:
+            s = name.lower()
+            for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+                s = s.replace(a, b)
+            return re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+
         results: list[dict] = []
-        seen: set[str] = set()
-        for a in soup.find_all("a", href=re.compile(r"^/verkaufen/[a-z0-9\-]+/[^/]+_\d+$")):
-            href = a["href"]
-            name = a.get_text(" ", strip=True)
-            if not name or href in seen:
+        for p in data.get("products", []) or []:
+            pid = p.get("id")
+            name = p.get("name", "")
+            if not pid or not name:
                 continue
-            seen.add(href)
+            # Skip products rebuy doesn't currently buy (no purchase price)
+            variants = p.get("variants") or []
+            if not any((v.get("purchasePrice") or 0) > 0 for v in variants):
+                continue
             if _word_matches(name):
-                results.append({"name": name, "url": f"https://www.rebuy.de{href}"})
+                url = f"https://www.rebuy.de/verkaufen/p/{_slugify(name)}_{pid}"
+                results.append({"name": name, "url": url})
 
         return _store(key, results[:10])
 

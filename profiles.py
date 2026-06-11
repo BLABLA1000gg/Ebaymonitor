@@ -34,7 +34,7 @@ class SearchProfile:
     # e.g. https://wirkaufens.de/produkte/apple-iphone-12-128-gb
     wirkaufens_url: str | None = None
     # Buyback platforms to search automatically (new flow).
-    # List of platform keys: ["zoxs", "wirkaufens", "clevertronic"]
+    # List of platform keys: ["zoxs", "wirkaufens", "clevertronic", "rebuy"]
     # When set, overrides the individual *_url fields above.
     buyback_platforms: list[str] = field(default_factory=list)
     # Additional search URLs (Kleinanzeigen, Vinted, extra eBay) scanned alongside ebay_url

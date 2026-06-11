@@ -33,6 +33,7 @@
     .platform-card.selected.wirkaufens { border-color: #f4b860; }
     .platform-card.selected.zoxs       { border-color: #7c8cff; }
     .platform-card.selected.clevertronic { border-color: #55d6be; }
+    .platform-card.selected.rebuy        { border-color: #ff7eb6; }
     .platform-card input[type="checkbox"] { display: none; }
     .platform-card .dot {
       width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0;
@@ -41,6 +42,7 @@
     .platform-card.selected.wirkaufens   .dot { background: #f4b860; border-color: #f4b860; }
     .platform-card.selected.zoxs         .dot { background: #7c8cff; border-color: #7c8cff; }
     .platform-card.selected.clevertronic .dot { background: #55d6be; border-color: #55d6be; }
+    .platform-card.selected.rebuy        .dot { background: #ff7eb6; border-color: #ff7eb6; }
     .platform-name { font-size: 13px; font-weight: 600; }
     .platform-hint { font-size: 11px; color: var(--muted); }
     .keyword-preview {
@@ -172,6 +174,16 @@
         <div>
           <div class="platform-name" style="color:#55d6be">Clevertronic</div>
           <div class="platform-hint">Refurbished Verkauf</div>
+        </div>
+      </label>
+
+      <label class="platform-card rebuy {% if 'rebuy' in active_platforms %}selected{% endif %}">
+        <input type="checkbox" name="buyback_platforms" value="rebuy"
+               {% if 'rebuy' in active_platforms %}checked{% endif %}>
+        <span class="dot"></span>
+        <div>
+          <div class="platform-name" style="color:#ff7eb6">rebuy</div>
+          <div class="platform-hint">Ankauf · Grades A1–A4</div>
         </div>
       </label>
     </div>

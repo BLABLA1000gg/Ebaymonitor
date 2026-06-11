@@ -681,16 +681,19 @@ def matched_buyback_price(
     zoxs_prices: dict | None,
     wkfs_prices: dict | None,
     clevertronic_prices: dict | None,
+    rebuy_prices: dict | None = None,
 ) -> dict[str, Decimal | None]:
     """
     Given a condition score and all-conditions price dicts, return the
     single condition-matched price per platform.
-    Returns {'zoxs': Decimal|None, 'wirkaufens': Decimal|None, 'clevertronic': Decimal|None}
+    Returns {'zoxs': ..., 'wirkaufens': ..., 'clevertronic': ..., 'rebuy': ...}
+    (each Decimal | None).
     """
     result: dict[str, Decimal | None] = {
         "zoxs": None,
         "wirkaufens": None,
         "clevertronic": None,
+        "rebuy": None,
     }
 
     # Broken phones are rejected by buyback portals — never map to a price.
@@ -706,6 +709,7 @@ def matched_buyback_price(
     #   ZOXS         → "Gut"
     #   WirKaufens   → "In Ordnung"
     #   Clevertronic → "Gebraucht"
+    #   rebuy        → "Gut" (A3)
     # The AI condition is still used for filtering (broken/non-functional →
     # skip), just never for picking a higher payout tier.
     if zoxs_prices:
@@ -735,6 +739,15 @@ def matched_buyback_price(
                     break
             if result["clevertronic"] is not None:
                 break
+
+    if rebuy_prices:
+        # rebuy grades: Wie neu (A1), Sehr gut (A2), Gut (A3), Stark genutzt (A4)
+        val = rebuy_prices.get("Gut") or rebuy_prices.get("Stark genutzt")
+        if val:
+            try:
+                result["rebuy"] = Decimal(str(val))
+            except Exception:
+                pass
 
     return result
 
@@ -1250,6 +1263,7 @@ def is_worth_it(
     zoxs_prices: dict | None,
     wkfs_prices: dict | None,
     clevertronic_prices: dict | None,
+    rebuy_prices: dict | None = None,
     shipping_cost: Decimal = Decimal("5"),
     fee_rate: Decimal = Decimal("0.1235"),
     fee_fixed: Decimal = Decimal("0.35"),
@@ -1273,7 +1287,9 @@ def is_worth_it(
     if title and not ai_is_device(title, description, api_key=api_key, provider=provider):
         return False, None, None
 
-    matched = matched_buyback_price(condition_score, zoxs_prices, wkfs_prices, clevertronic_prices)
+    matched = matched_buyback_price(
+        condition_score, zoxs_prices, wkfs_prices, clevertronic_prices, rebuy_prices
+    )
     buyback = best_buyback_price(matched)
 
     if buyback is None or listing_price <= 0:
