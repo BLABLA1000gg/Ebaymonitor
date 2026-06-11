@@ -110,7 +110,147 @@ class BuybackScraper:
           - False → "Nein – Einschränkungen vorhanden oder Akku unter 81%"
 
         Returns {condition_label: price} for all available conditions.
+
+        Implementation: no browser needed. The sell page is static HTML that
+        embeds the whole wizard (question/answer buttons with their form
+        values) plus a CSRF token in a meta tag. The price endpoint
+        ``/shopControllerDV.php?objective=doCheck&returnOk=1`` accepts a
+        form-encoded POST (with X-CSRF-Token header and the cookies from a
+        prior GET of the sell page) and returns JSON ``{"summe": "305,50", ...}``.
+        One GET + one POST per condition replaces the old full-browser flow.
         """
+        result: dict[str, Decimal] = {}
+        try:
+            result = self._clevertronic_api(url, functional, battery_ok)
+        except Exception:
+            LOGGER.warning("Clevertronic: API scrape failed for %s — falling back to browser", url, exc_info=True)
+        if result:
+            return result
+        try:
+            return self._clevertronic_browser(url, functional, battery_ok)
+        except Exception:
+            LOGGER.warning("Clevertronic: browser fallback failed for %s", url, exc_info=True)
+            return {}
+
+    def _clevertronic_api(self, url: str, functional: bool, battery_ok: bool) -> dict[str, Decimal]:
+        """Direct form-POST scrape of Clevertronic Ankaufpreise (no browser)."""
+        from curl_cffi.requests import Session as CurlSession
+
+        ua = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        device_good = functional and battery_ok
+        result: dict[str, Decimal] = {}
+        _valid = {"neu", "wie neu", "sehr gut", "gut", "gebraucht", "akzeptabel", "beschädigt"}
+
+        with CurlSession(impersonate="chrome120") as s:
+            html = ""
+            for attempt in range(2):
+                try:
+                    r = s.get(
+                        url,
+                        headers={
+                            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                            "Accept-Language": "de-DE,de;q=0.9",
+                            "User-Agent": ua,
+                        },
+                        timeout=20,
+                    )
+                    if r.status_code == 200 and "js_sellbox_button" in r.text:
+                        html = r.text
+                        break
+                except Exception:
+                    if attempt == 1:
+                        raise
+            if not html:
+                return result
+
+            m = re.search(r'id="js-csrf-token-meta"[^>]*content="([^"]+)"', html)
+            if not m:
+                m = re.search(r'content="([^"]+)"[^>]*id="js-csrf-token-meta"', html)
+            if not m:
+                return result
+            csrf_token = m.group(1)
+
+            soup = BeautifulSoup(html, "html.parser")
+            form = soup.find("form", id="checkform")
+            if form is None:
+                return result
+            art_input = form.find("input", attrs={"name": "check[artikel_typ_id]"})
+            if art_input is None or not art_input.get("value"):
+                return result
+            artikel_typ_id = art_input["value"]
+
+            # Walk the wizard groups: each question is a div.sell_buttons with
+            # data-toggle-name="check[pe][<id>]"; its answers are the
+            # .js_sellbox_button children carrying data-answer / data-value.
+            functional_field = None  # (pe_name, value)
+            condition_field_name = None
+            conditions: list[tuple[str, str]] = []  # (label, value)
+            for grp in form.find_all("div", class_="sell_buttons"):
+                pe_name = grp.get("data-toggle-name", "")
+                if not pe_name.startswith("check[pe]["):
+                    continue
+                buttons = []
+                for btn in grp.find_all(class_="js_sellbox_button"):
+                    ans = btn.get("data-answer")
+                    val = btn.get("data-value")
+                    if ans is None or val is None:
+                        continue
+                    buttons.append((re.sub(r"\s+", " ", ans).strip(), val, btn.get("data-question", "")))
+                if not buttons:
+                    continue
+                question = buttons[0][2]
+                if question.startswith("Ist das Gerät funktionsfähig") and functional_field is None:
+                    # First answer = "Ja – voll funktionsfähig", second = "Nein"
+                    idx = 0 if device_good else min(1, len(buttons) - 1)
+                    functional_field = (pe_name, buttons[idx][1])
+                elif "Zustand" in question and condition_field_name is None:
+                    condition_field_name = pe_name
+                    for label, val, _q in buttons:
+                        # Normalize: "Beschädigt / Gebrochen" → "Beschädigt"
+                        clean = label.split("/")[0].strip()
+                        if clean.lower() in _valid:
+                            conditions.append((clean, val))
+            if condition_field_name is None or not conditions:
+                return result
+
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-CSRF-Token": csrf_token,
+                "X-Requested-With": "XMLHttpRequest",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "User-Agent": ua,
+                "Referer": url,
+                "Origin": "https://www.clevertronic.de",
+            }
+            for label, val in conditions:
+                payload = {"check[artikel_typ_id]": artikel_typ_id, condition_field_name: val}
+                if functional_field:
+                    payload[functional_field[0]] = functional_field[1]
+                data = None
+                for attempt in range(2):
+                    try:
+                        pr = s.post(
+                            "https://www.clevertronic.de/shopControllerDV.php?objective=doCheck&returnOk=1",
+                            data=payload,
+                            headers=headers,
+                            timeout=15,
+                        )
+                        if pr.status_code == 200:
+                            data = json.loads(pr.text)
+                            break
+                    except Exception:
+                        pass
+                if isinstance(data, dict) and data.get("summe"):
+                    price = _parse_eur(str(data["summe"]))
+                    if price is not None and price > 0:
+                        result[label] = price
+        return result
+
+    def _clevertronic_browser(self, url: str, functional: bool = True, battery_ok: bool = True) -> dict[str, Decimal]:
+        """Playwright fallback for Clevertronic (used only if the direct API path fails)."""
         ctx = self._browser.new_context(
             locale="de-DE",
             viewport={"width": 1366, "height": 768},
