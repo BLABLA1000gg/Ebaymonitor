@@ -859,8 +859,73 @@ def _fetch_ka_images(url: str) -> list[str]:
     return imgs
 
 
+_VINTED_ITEM_ID_RE = re.compile(r"/items/(\d+)")
+_VINTED_GB_RE = re.compile(r'\b\d{2,4}\s?(?:gb|go)\b|\b\d\s?tb\b', re.IGNORECASE)
+
+
 def _fetch_vinted_details(url: str) -> tuple[list[str], str]:
     """Fetch Vinted listing images + description. Returns (images, description).
+
+    Primary path: Vinted's internal JSON API —
+    /api/v2/items/<id>/plugins/sidebar for the description (and title) and
+    /api/v2/items/<id>/photos for full-size photo URLs. Uses the shared
+    anonymous-cookie session from marketplaces, which tolerates far more
+    sequential requests than the HTML item pages (~26/IP burst limit).
+    Falls back to the legacy HTML-regex scrape if the API fails.
+    """
+    id_match = _VINTED_ITEM_ID_RE.search(url)
+    if id_match:
+        try:
+            from marketplaces import vinted_api_get
+
+            item_id = id_match.group(1)
+            r = vinted_api_get(f"/api/v2/items/{item_id}/plugins/sidebar")
+            if r.status_code != 200:
+                raise RuntimeError(f"sidebar HTTP {r.status_code}")
+            description = ""
+            title = ""
+            for plugin in r.json().get("plugins", []):
+                data = plugin.get("data") or {}
+                if plugin.get("name") == "description":
+                    description = data.get("description") or ""
+                elif plugin.get("name") == "summary":
+                    for line in data.get("lines", []):
+                        for el in line.get("elements", []):
+                            if el.get("style") == "title":
+                                title = el.get("value") or ""
+
+            # Storage attribute guard: sellers often put the GB size only in
+            # the title / platform attribute, never in the free text. Accept
+            # the title's size ONLY when it names exactly one plausible value.
+            if description and not _VINTED_GB_RE.search(description):
+                sizes = {
+                    int(m) for m in re.findall(r'\b(\d{2,4})\s?(?:gb|go)\b', title, re.IGNORECASE)
+                } & {16, 32, 64, 128, 256, 512}
+                sizes |= {
+                    int(m) * 1024 for m in re.findall(r'\b(\d)\s?tb\b', title, re.IGNORECASE)
+                } & {1024}
+                if len(sizes) == 1:
+                    description += f"\n[Vinted-Attribut: {sizes.pop()} GB]"
+
+            rp = vinted_api_get(f"/api/v2/items/{item_id}/photos")
+            imgs: list[str] = []
+            if rp.status_code == 200:
+                for photo in rp.json().get("photos", []):
+                    u = photo.get("full_size_url") or photo.get("url")
+                    if u:
+                        imgs.append(u)
+
+            if description or imgs:
+                return imgs, description
+        except Exception:
+            pass
+
+    return _fetch_vinted_details_html(url)
+
+
+def _fetch_vinted_details_html(url: str) -> tuple[list[str], str]:
+    """Legacy fallback: scrape the item HTML page. Rate-limited (~26 req/IP
+    burst) and brittle — only used when the JSON API path fails.
 
     Vinted dropped __NEXT_DATA__ — description and photos are now embedded as
     JSON strings within the main HTML bundle. We extract them via regex.

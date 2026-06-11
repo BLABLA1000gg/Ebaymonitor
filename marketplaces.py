@@ -2,7 +2,8 @@ from __future__ import annotations
 import re
 import threading
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlparse
+from decimal import Decimal, InvalidOperation
+from urllib.parse import urljoin, urlparse, parse_qs
 
 import requests
 from bs4 import BeautifulSoup
@@ -164,6 +165,123 @@ def parse_vinted_listings(html: str) -> list[Listing]:
     return listings
 
 
+# ── Vinted JSON API ──────────────────────────────────────────────────────────
+# Vinted's web app talks to an internal JSON API which is far more reliable
+# than scraping the HTML (no markup churn, much higher rate limits). The API
+# only requires the anonymous session cookies handed out on the homepage
+# (access_token_web etc.), so we do one homepage GET per process and reuse
+# the curl_cffi session (Chrome TLS fingerprint) for every API call.
+
+VINTED_API_BASE = "https://www.vinted.de"
+
+_VINTED_CURL_SESSION: "CurlSession | None" = None  # type: ignore[type-arg]
+_VINTED_CURL_SESSION_LOCK = threading.Lock()
+
+_VINTED_API_HEADERS = {
+    "Accept": "application/json",
+    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+}
+
+
+def _vinted_session(timeout: int = 15) -> "CurlSession":
+    """Return the shared Vinted curl_cffi session, performing the anonymous
+    cookie handshake (homepage GET) on first use. Thread-safe."""
+    global _VINTED_CURL_SESSION
+    if not _CURL_CFFI_AVAILABLE:
+        raise RuntimeError("curl_cffi is required for the Vinted API")
+    with _VINTED_CURL_SESSION_LOCK:
+        if _VINTED_CURL_SESSION is None:
+            session = CurlSession(impersonate="chrome120")
+            # Homepage GET seeds the anonymous session cookies
+            # (access_token_web / refresh_token_web / anon_id).
+            session.get(f"{VINTED_API_BASE}/", timeout=timeout)
+            _VINTED_CURL_SESSION = session
+    return _VINTED_CURL_SESSION
+
+
+def _vinted_reset_session() -> None:
+    global _VINTED_CURL_SESSION
+    with _VINTED_CURL_SESSION_LOCK:
+        _VINTED_CURL_SESSION = None
+
+
+def vinted_api_get(path: str, params: dict | None = None, timeout: int = 15):
+    """GET a Vinted /api/v2/... path with the shared anonymous session.
+    Refreshes the cookie handshake once on 401."""
+    session = _vinted_session(timeout)
+    response = session.get(
+        f"{VINTED_API_BASE}{path}", params=params,
+        headers=_VINTED_API_HEADERS, timeout=timeout,
+    )
+    if response.status_code == 401:
+        _vinted_reset_session()
+        session = _vinted_session(timeout)
+        response = session.get(
+            f"{VINTED_API_BASE}{path}", params=params,
+            headers=_VINTED_API_HEADERS, timeout=timeout,
+        )
+    return response
+
+
+def fetch_vinted_listings_api(url: str, timeout: int = 15) -> list[Listing]:
+    """Fetch Vinted catalog results via the JSON API.
+
+    Translates a user-configured catalog URL (e.g.
+    https://www.vinted.de/catalog?search_text=iphone+13+pro) into a
+    /api/v2/catalog/items query and maps the JSON items onto Listing objects
+    with the same shape parse_vinted_listings() produces.
+    """
+    query = parse_qs(urlparse(url).query)
+    params: dict = {"per_page": 96, "page": 1}
+    for key in ("search_text", "price_from", "price_to", "order", "currency"):
+        if key in query and query[key]:
+            params[key] = query[key][0]
+    # Multi-value filters (catalog[], brand_ids[], status_ids[], ...) pass
+    # straight through — the API uses the same parameter names as the web URL.
+    for key, values in query.items():
+        if key.endswith("[]") and values:
+            params[key] = values
+
+    response = vinted_api_get("/api/v2/catalog/items", params=params, timeout=timeout)
+    if response.status_code != 200:
+        raise requests.HTTPError(
+            f"Vinted API returned HTTP {response.status_code} for catalog query"
+        )
+    payload = response.json()
+    listings: list[Listing] = []
+    for item in payload.get("items", []):
+        title = item.get("title")
+        item_url = item.get("url") or (
+            urljoin(VINTED_API_BASE, item["path"]) if item.get("path") else None
+        )
+        price_obj = item.get("price") or {}
+        amount = price_obj.get("amount")
+        if not title or not item_url or amount is None:
+            continue
+        # Canonical link without query params so DB dedup stays stable.
+        link = item_url.split("?")[0]
+        currency = price_obj.get("currency_code")
+        try:
+            price = Decimal(str(amount))
+        except (InvalidOperation, ValueError):
+            price = None
+        photo = item.get("photo") or {}
+        symbol = {"EUR": "€", "USD": "$", "GBP": "£"}.get(currency, currency or "")
+        price_text = f"{amount} {symbol}".strip()
+        listings.append(
+            Listing(
+                title=title,
+                link=link,
+                price_text=price_text,
+                price=price,
+                currency=currency,
+                image_url=photo.get("url"),
+                condition=item.get("status"),
+            )
+        )
+    return listings
+
+
 _EBAY_CURL_SESSION: "CurlSession | None" = None  # type: ignore[type-arg]
 _EBAY_CURL_SESSION_LOCK = threading.Lock()
 
@@ -219,6 +337,14 @@ def fetch_marketplace_listings(
     browser_fetcher=None,
 ) -> list[Listing]:
     marketplace = marketplace_for_url(url)
+
+    if marketplace is VINTED and not browser_fetcher and _CURL_CFFI_AVAILABLE:
+        # Prefer the JSON API — faster, no markup churn, far higher rate
+        # limits than the HTML pages. Fall back to HTML scraping if it fails.
+        try:
+            return fetch_vinted_listings_api(url, timeout=timeout)
+        except Exception:
+            pass
 
     if browser_fetcher:
         response = browser_fetcher.get(url, timeout)
