@@ -282,6 +282,227 @@ def fetch_vinted_listings_api(url: str, timeout: int = 15) -> list[Listing]:
     return listings
 
 
+# ── Kleinanzeigen gateway JSON API ───────────────────────────────────────────
+# The Kleinanzeigen mobile app talks to a REST gateway that returns clean JSON
+# ads (the public website has no anonymous API). Access is read-only and gated
+# by HTTP Basic auth with a STATIC credential embedded in the app (a public app
+# token, not user data) plus the app's okhttp User-Agent. We reuse one session.
+#
+# JSON shape note: the gateway serialises its XML schema into JSON, so most
+# values are wrapped, e.g. {"value": ...}, and dict keys are namespaced like
+# "{http://...}ads". Helpers below strip namespaces and unwrap {"value": ...}.
+
+KA_API_BASE = "https://api.kleinanzeigen.de/api"
+KA_API_BASIC_TOKEN = "YW5kcm9pZDpUYVI2MHBFdHRZ"  # base64("android:TaR60pEttY") — public app credential
+KA_API_USER_AGENT = "okhttp/4.10.0"
+
+_KA_API_HEADERS = {
+    "Authorization": f"Basic {KA_API_BASIC_TOKEN}",
+    "User-Agent": KA_API_USER_AGENT,
+    "Accept": "application/json",
+    "Accept-Language": "de-DE,de;q=0.9",
+}
+
+_KA_API_SESSION: requests.Session | None = None
+_KA_API_SESSION_LOCK = threading.Lock()
+
+_KA_AD_ID_RE = re.compile(r"/(\d{6,})(?:[-/?#]|$)")
+
+
+def _ka_api_session() -> requests.Session:
+    """Shared keep-alive requests session for the Kleinanzeigen gateway."""
+    global _KA_API_SESSION
+    with _KA_API_SESSION_LOCK:
+        if _KA_API_SESSION is None:
+            session = requests.Session()
+            session.headers.update(_KA_API_HEADERS)
+            _KA_API_SESSION = session
+    return _KA_API_SESSION
+
+
+def _ka_strip_ns(key: str) -> str:
+    """'{http://...}ads' -> 'ads'."""
+    return key.rsplit("}", 1)[-1]
+
+
+def _ka_get(node, *keys):
+    """Walk a namespaced gateway dict by local key names, tolerating missing
+    nodes. Returns the final value or None."""
+    cur = node
+    for key in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = {_ka_strip_ns(k): v for k, v in cur.items()}.get(key)
+        if cur is None:
+            return None
+    return cur
+
+
+def _ka_value(node):
+    """Unwrap a {'value': X} wrapper (one level), else return node as-is."""
+    if isinstance(node, dict) and "value" in node:
+        return node["value"]
+    return node
+
+
+def ka_ad_id_from_url(url: str) -> str | None:
+    """Extract the numeric ad id from a Kleinanzeigen web URL, e.g.
+    https://www.kleinanzeigen.de/s-anzeige/iphone-13-pro/3432483015-173-8855."""
+    match = _KA_AD_ID_RE.search(url)
+    return match.group(1) if match else None
+
+
+def _ka_ad_to_listing(ad: dict) -> Listing | None:
+    """Map one gateway ad dict onto a Listing (same shape as the HTML parser)."""
+    ad = {_ka_strip_ns(k): v for k, v in ad.items()}
+    title = _ka_value(ad.get("title"))
+    if not title:
+        return None
+
+    # Canonical public web URL (rel='self-public-website'); fall back to id.
+    link = None
+    for entry in ad.get("link", []) or []:
+        if entry.get("rel") == "self-public-website" and entry.get("href"):
+            link = entry["href"]
+            break
+    if not link:
+        ad_id = ad.get("id") or _ka_value(_ka_get(ad, "id"))
+        if not ad_id:
+            return None
+        link = f"https://www.kleinanzeigen.de/s-anzeige/{ad_id}"
+
+    amount = _ka_value(_ka_get(ad, "price", "amount"))
+    currency = _ka_value(_ka_get(ad, "price", "currency-iso-code")) or "EUR"
+    if isinstance(currency, dict):
+        currency = currency.get("value") or "EUR"
+    price = None
+    if amount is not None:
+        try:
+            price = Decimal(str(amount))
+        except (InvalidOperation, ValueError):
+            price = None
+    symbol = {"EUR": "€", "USD": "$", "GBP": "£"}.get(currency, currency or "")
+    price_text = f"{amount} {symbol}".strip() if amount is not None else "VB"
+
+    # First picture (prefer a large variant) for the thumbnail.
+    image_url = None
+    pictures = _ka_get(ad, "pictures", "picture") or []
+    if pictures:
+        links = pictures[0].get("link", []) if isinstance(pictures[0], dict) else []
+        by_rel = {l.get("rel"): l.get("href") for l in links if isinstance(l, dict)}
+        image_url = (
+            by_rel.get("large") or by_rel.get("teaser")
+            or by_rel.get("thumbnail") or (links[0].get("href") if links else None)
+        )
+
+    location = _ka_value(_ka_get(ad, "ad-address", "state"))
+    zip_code = _ka_value(_ka_get(ad, "ad-address", "zip-code"))
+    if location and zip_code:
+        location = f"{zip_code} {location}"
+    elif zip_code:
+        location = zip_code
+
+    return Listing(
+        title=title,
+        link=link,
+        price_text=price_text,
+        price=price,
+        currency=currency,
+        image_url=image_url,
+        location=location,
+    )
+
+
+def fetch_kleinanzeigen_listings_api(url: str, timeout: int = 10) -> list[Listing]:
+    """Fetch Kleinanzeigen search results via the gateway JSON API.
+
+    Translates a KA web search URL (e.g. https://www.kleinanzeigen.de/s-iphone-13-pro/k0)
+    into a /ads.json query and maps the JSON ads onto Listing objects with the
+    same shape parse_kleinanzeigen_listings() produces.
+    """
+    params: dict = {
+        "q": _ka_query_from_url(url),
+        "page": 0,
+        "size": 30,
+        "includeTopAds": "false",
+        "limitTotalResultCount": "false",
+    }
+    session = _ka_api_session()
+    response = session.get(f"{KA_API_BASE}/ads.json", params=params, timeout=timeout)
+    if response.status_code != 200:
+        raise requests.HTTPError(
+            f"Kleinanzeigen gateway returned HTTP {response.status_code} for search",
+            response=response,
+        )
+    payload = response.json()
+    ads = _ka_get(payload, "ads", "value", "ad") or _ka_get(payload, "ads", "ad") or []
+    listings: list[Listing] = []
+    for ad in ads:
+        listing = _ka_ad_to_listing(ad)
+        if listing is not None:
+            listings.append(listing)
+    return listings
+
+
+_KA_SLUG_RE = re.compile(r"/s-([^/]+?)(?:/(?:k\d+|c\d+|[\w-]*))*$")
+
+
+def _ka_query_from_url(url: str) -> str:
+    """Derive a free-text query from a KA web search URL.
+
+    https://www.kleinanzeigen.de/s-iphone-13-pro/k0 -> 'iphone 13 pro'
+    Also honours an explicit ?keywords= / ?q= query parameter if present.
+    """
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    for key in ("keywords", "q", "search_text"):
+        if query.get(key):
+            return query[key][0]
+    # Path slug: take the first '/s-<slug>' segment and turn dashes into spaces.
+    for segment in parsed.path.split("/"):
+        if segment.startswith("s-"):
+            slug = segment[2:]
+            # Drop a trailing category-ish token (rare in the first segment).
+            return slug.replace("-", " ").strip()
+    return ""
+
+
+def fetch_kleinanzeigen_ad_detail(url: str, timeout: int = 10) -> tuple[list[str], str]:
+    """Fetch a single Kleinanzeigen ad's images + description via the gateway.
+
+    Returns (image_urls, description). Raises on non-200 / missing id so callers
+    can fall back to HTML scraping.
+    """
+    ad_id = ka_ad_id_from_url(url)
+    if not ad_id:
+        raise ValueError(f"No Kleinanzeigen ad id in URL: {url}")
+    session = _ka_api_session()
+    response = session.get(f"{KA_API_BASE}/ads/{ad_id}.json", timeout=timeout)
+    if response.status_code != 200:
+        raise requests.HTTPError(
+            f"Kleinanzeigen gateway returned HTTP {response.status_code} for ad {ad_id}",
+            response=response,
+        )
+    payload = response.json()
+    ad = _ka_get(payload, "ad", "value") or _ka_get(payload, "ad") or {}
+    ad = {_ka_strip_ns(k): v for k, v in ad.items()} if isinstance(ad, dict) else {}
+    description = _ka_value(ad.get("description")) or ""
+
+    images: list[str] = []
+    pictures = _ka_get(ad, "pictures", "picture") or []
+    for picture in pictures:
+        links = picture.get("link", []) if isinstance(picture, dict) else []
+        by_rel = {l.get("rel"): l.get("href") for l in links if isinstance(l, dict)}
+        href = (
+            by_rel.get("XXL") or by_rel.get("extraLarge") or by_rel.get("large")
+            or by_rel.get("teaser") or (links[0].get("href") if links else None)
+        )
+        if href and "{imageId}" not in href:
+            images.append(href)
+    images = list(dict.fromkeys(images))
+    return images, description
+
+
 _EBAY_CURL_SESSION: "CurlSession | None" = None  # type: ignore[type-arg]
 _EBAY_CURL_SESSION_LOCK = threading.Lock()
 
@@ -337,6 +558,16 @@ def fetch_marketplace_listings(
     browser_fetcher=None,
 ) -> list[Listing]:
     marketplace = marketplace_for_url(url)
+
+    if marketplace is KLEINANZEIGEN and not browser_fetcher:
+        # Prefer the gateway JSON API — clean JSON, no markup churn. Fall back
+        # to HTML scraping if it fails (token rotated, schema change, etc.).
+        try:
+            listings = fetch_kleinanzeigen_listings_api(url, timeout=timeout)
+            if listings:
+                return listings
+        except Exception:
+            pass
 
     if marketplace is VINTED and not browser_fetcher and _CURL_CFFI_AVAILABLE:
         # Prefer the JSON API — faster, no markup churn, far higher rate

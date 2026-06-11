@@ -856,12 +856,23 @@ def _ka_reset_session():
 def _fetch_ka_details(url: str) -> tuple[list[str], str]:
     """Fetch Kleinanzeigen listing images + description. Returns (images, description).
 
-    Kleinanzeigen has no anonymous JSON API (the app gateway is auth-gated), so
-    this parses the page HTML. It is hardened with a shared keep-alive session,
-    one retry, and a JSON-LD ImageObject fallback for images.
+    Primary path: the Kleinanzeigen mobile gateway JSON API (read-only, gated by
+    a static public app credential) which returns the description and full-size
+    image URLs directly. Falls back to the hardened HTML scrape (shared keep-alive
+    session, one retry, JSON-LD ImageObject fallback) if the gateway fails.
     """
     from bs4 import BeautifulSoup
     import json as _json
+
+    try:
+        from marketplaces import fetch_kleinanzeigen_ad_detail
+
+        imgs, description = fetch_kleinanzeigen_ad_detail(url)
+        imgs = [_to_hires(u) for u in imgs]
+        if imgs or description:
+            return imgs, description
+    except Exception:
+        pass
 
     last_err: Exception | None = None
     for attempt in range(2):
