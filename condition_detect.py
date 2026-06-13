@@ -352,15 +352,14 @@ def ai_assess_listing_batch(
         "  condition: integer 0-5 as above\n"
         "  functional: true ONLY if fully working, no significant damage. "
         "Set false if: cracked/broken screen, cracked back glass, water damage, "
-        "not turning on, needs repair, touch defect, iCloud/MDM lock, camera broken, "
-        "occasional crashes, SIM not recognized, 'für Bastler', 'Ersatzteile'.\n"
+        "not turning on, needs repair, touch defect, camera broken, "
+        "occasional crashes ('Abstürze'), 'für Bastler', 'Ersatzteile'.\n"
         "  battery_ok: true if battery >=81% or not mentioned, false if explicitly <81%\n"
         "  has_box: true if original box/OVP included\n"
         "  has_cable: true if original cable/charger included\n"
         "CRITICAL: When in doubt grade ONE level lower. "
         "Any mention of crack/Riss/Haarriss/Sprung → condition=0 regardless of how 'klein'. "
         "'Gelegentliche Abstürze'/'startet manchmal nicht' → functional=false. "
-        "'iCloud drin'/'Account drin' without confirmed factory reset → functional=false. "
         "Output ONLY a JSON array of objects, one per listing, in order. No text."
     )
 
@@ -374,7 +373,7 @@ def ai_assess_listing_batch(
             from openai import OpenAI
             client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key, timeout=40, max_retries=0)
             resp = client.chat.completions.create(
-                model="meta/llama-3.1-8b-instruct",
+                model="meta/llama-4-maverick-17b-128e-instruct",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
@@ -564,8 +563,7 @@ _PATTERNS: list[tuple[int, list[str]]] = [
         "kamera defekt", "kamera kaputt", "kamera funktioniert nicht",
         "lautsprecher defekt", "mikrofon defekt", "wlan defekt", "bluetooth defekt",
         "sim karte wird nicht erkannt", "sim wird nicht erkannt", "kein empfang",
-        "gesperrt", "icloud gesperrt", "icloud lock", "activation lock",
-        "mdm gesperrt", "carrier locked",
+        "icloud gesperrt", "mdm gesperrt",
         "wasserschaden", "wasser schaden", "liquid damage", "water damage",
         "geruchsschaden", "brandschaden",
         "touchscreen reagiert nicht", "display reagiert nicht",
@@ -801,7 +799,7 @@ _IMAGE_CACHE: dict[str, int] = {}
 _LISTING_IMG_CACHE: dict[str, list[str]] = {}
 
 # Vision model (NVIDIA NIM — free tier)
-_VISION_MODEL = "meta/llama-3.2-11b-vision-instruct"
+_VISION_MODEL = "meta/llama-4-maverick-17b-128e-instruct"
 
 
 def _to_hires(url: str) -> str:
@@ -1377,7 +1375,7 @@ def ai_assess_listing_full(
         "0 = Beschädigt/Defekt: Display OR frame/back has a CRACK or BREAK — buyback portals reject these\n\n"
         "functional: false if ANY of these apply: cracked/broken screen, cracked back glass, "
         "water damage, device not turning on, needs repair, display defect, touch not working, "
-        "iCloud/MDM/activation lock, carrier-locked, camera broken, no SIM reception\n"
+        "camera broken, SIM not recognized, 'für Bastler', 'Ersatzteile'\n"
         "battery_ok: false only if description explicitly states battery <81% health\n"
         "has_box: true if original box/OVP mentioned\n"
         "has_cable: true if original cable/charger included\n\n"
@@ -1394,7 +1392,6 @@ def ai_assess_listing_full(
         "- 'Kleinere Gebrauchsspuren' + single blurry photo → risk='hoch'\n"
         "- 'Gerät hat minimalen Haarriss am Glas' → condition=0, functional=false\n"
         "- 'Akku bei 79%' → battery_ok=false\n"
-        "- 'iCloud Account drin, kann zurückgesetzt werden' → functional=false (activation lock risk)\n"
         "- 'Gelegentliche Abstürze' → functional=false\n"
         "- 'Display hat leichte Kratzer, Rest einwandfrei' + photo confirms → condition=2\n\n"
         "risk: your confidence that buying this BLIND (sight unseen, with real money) is safe:\n"
