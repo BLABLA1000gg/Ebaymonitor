@@ -364,7 +364,10 @@ def ai_assess_listing_batch(
         "Output ONLY a JSON array of objects, one per listing, in order. No text."
     )
 
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
     user_msg = "\n".join(lines)
+    _log.debug("Text-batch: provider=%s listings=%d uncached=%d", provider, len(listings), len(uncached))
 
     try:
         if provider == "nvidia":
@@ -381,6 +384,7 @@ def ai_assess_listing_batch(
                 stream=False,
             )
             text = resp.choices[0].message.content.strip()
+            _log.debug("Text-batch NVIDIA OK: %d chars", len(text))
         elif provider == "deepseek":
             import requests as _req
             r = _req.post(
@@ -397,12 +401,17 @@ def ai_assess_listing_batch(
                 },
                 timeout=15,
             )
+            if r.status_code != 200:
+                _log.warning("Text-batch DeepSeek HTTP %s: %s", r.status_code, r.text[:200])
             text = r.json()["choices"][0]["message"]["content"].strip()
+            _log.debug("Text-batch DeepSeek OK: %d chars", len(text))
         else:
             text = ""
 
         # Parse JSON array from response
         m = re.search(r"\[.*\]", text, re.DOTALL)
+        if not m:
+            _log.warning("Text-batch: no JSON array in response: %s", text[:200])
         parsed = _json.loads(m.group()) if m else []
 
         for j, raw in enumerate(parsed):
@@ -417,13 +426,16 @@ def ai_assess_listing_batch(
                 "has_box":     bool(raw.get("has_box", False)),
                 "has_cable":   bool(raw.get("has_cable", False)),
             }
+            _log.debug("Text-batch result[%d] %r: cond=%s func=%s",
+                       i, title[:30], d["condition"], d["functional"])
             results[i] = d
             k = _assess_key(title, listings[i][1])
             _assess_cache[k] = d
             _cond_cache[k] = d["condition"]
 
-    except Exception:
-        pass
+    except Exception as e:
+        _log.warning("Text-batch FAIL (provider=%s, %d listings): %s: %s",
+                     provider, len(uncached), type(e).__name__, str(e)[:300])
 
     return [r if r is not None else default.copy() for r in results]
 
@@ -1173,23 +1185,36 @@ def check_listing_images(
     return scores[len(scores) // 2]
 
 
+_LOGGER_CD = __import__("logging").getLogger(__name__)
+
+
 def _image_to_b64(image_url: str) -> str | None:
-    """Download an image and return base64 data URI. Required for URLs that
-    NVIDIA's servers can't fetch directly (e.g. eBay CDN images)."""
+    """Download an image and return base64 data URI."""
+    if not image_url:
+        return None
     try:
         import base64
         from curl_cffi.requests import Session as CurlSession
         with CurlSession(impersonate="chrome120") as s:
             r = s.get(image_url, timeout=10, headers={
                 "User-Agent": "Mozilla/5.0",
-                "Accept": "image/*",
+                "Accept": "image/*,*/*",
+                "Referer": "https://www.vinted.de/",
             })
             if r.status_code != 200 or not r.content:
+                _LOGGER_CD.debug("Image download %s: HTTP %s (size %s)",
+                                 image_url[:60], r.status_code, len(r.content))
                 return None
             mime = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            if not mime.startswith("image/"):
+                _LOGGER_CD.debug("Image download %s: non-image content-type %s",
+                                 image_url[:60], mime)
+                return None
             b64 = base64.b64encode(r.content).decode()
+            _LOGGER_CD.debug("Image download %s: OK %s bytes", image_url[:60], len(r.content))
             return f"data:{mime};base64,{b64}"
-    except Exception:
+    except Exception as e:
+        _LOGGER_CD.debug("Image download %s: exception %s", image_url[:60], e)
         return None
 
 
@@ -1383,6 +1408,8 @@ def ai_assess_listing_full(
         '"risk": "<niedrig/mittel/hoch>", "reason": "<kurze Begründung>"}'
     )})
 
+    img_size_kb = len(content[0].get("image_url", {}).get("url", "")) // 1024 if content else 0
+    _LOGGER_CD.debug("Vision call: title=%r images=1 payload_kb~=%s", title[:40], img_size_kb)
     try:
         from openai import OpenAI
         client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key, timeout=40, max_retries=0)
@@ -1396,6 +1423,7 @@ def ai_assess_listing_full(
         text = resp.choices[0].message.content.strip()
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if not m:
+            _LOGGER_CD.warning("Vision: no JSON in response for %r: %s", title[:40], text[:120])
             return None
         raw = _json.loads(m.group())
         risk = str(raw.get("risk", "")).strip().lower()
@@ -1408,9 +1436,13 @@ def ai_assess_listing_full(
             "risk":       risk if risk in ("niedrig", "mittel", "hoch") else "mittel",
             "reason":     str(raw.get("reason", "")).strip()[:120],
         }
+        _LOGGER_CD.debug("Vision OK: %r → cond=%s func=%s risk=%s reason=%s",
+                         title[:40], result["condition"], result["functional"],
+                         result["risk"], result["reason"])
         _assess_cache[cache_key] = result
         return result
-    except Exception:
+    except Exception as e:
+        _LOGGER_CD.warning("Vision FAIL: %r → %s: %s", title[:40], type(e).__name__, str(e)[:200])
         return None
 
 

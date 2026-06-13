@@ -393,7 +393,13 @@ def scan_profiles(
                     # Fallback: text-only batch assessment
                     # If BOTH fail: skip listing (safe default — don't buy blind)
                     assess = None
+                    vision_ok = False
                     if api_key and provider == "nvidia":
+                        LOGGER.debug("%s: Vision-Assessment — img=%s desc_len=%d — %s",
+                                     profile.name,
+                                     "ja" if item.image_url else "nein",
+                                     len(item_desc),
+                                     item.title[:50])
                         try:
                             assess = ai_assess_listing_full(
                                 title=item.title,
@@ -404,27 +410,42 @@ def scan_profiles(
                                 provider=provider,
                                 max_images=1,
                             )
+                            if assess is not None:
+                                vision_ok = True
+                                LOGGER.debug("%s: Vision OK — cond=%s func=%s risk=%s — %s",
+                                             profile.name, assess.get("condition"),
+                                             assess.get("functional"), assess.get("risk"),
+                                             item.title[:50])
+                            else:
+                                LOGGER.info("%s: Vision None (kein Bild oder Fehler) — %s",
+                                            profile.name, item.title[:60])
                         except Exception as ve:
-                            LOGGER.warning("%s: vision failed for %s: %s",
-                                           profile.name, item.title[:40], ve)
+                            LOGGER.warning("%s: Vision Exception %s — %s: %s",
+                                           profile.name, item.title[:40], type(ve).__name__, ve)
 
                         # Fallback: text-only when vision returned None
-                        # (happens for KA listings whose images need auth)
                         if assess is None:
+                            LOGGER.debug("%s: Text-Fallback für — %s", profile.name, item.title[:50])
                             try:
                                 batch = ai_assess_listing_batch(
                                     [(item.title, item_desc)],
                                     api_key=api_key, provider=provider,
                                 )
-                                if batch:
+                                if batch and batch[0] is not None:
                                     assess = batch[0]
+                                    LOGGER.debug("%s: Text-Fallback OK — cond=%s func=%s — %s",
+                                                 profile.name, assess.get("condition"),
+                                                 assess.get("functional"), item.title[:50])
+                                else:
+                                    LOGGER.warning("%s: Text-Fallback None — %s",
+                                                   profile.name, item.title[:60])
                             except Exception as e:
-                                LOGGER.debug("%s: text-only assessment failed for %s: %s",
-                                             profile.name, item.title[:40], e)
+                                LOGGER.warning("%s: Text-Fallback Fehler %s — %s: %s",
+                                               profile.name, item.title[:40], type(e).__name__, e)
 
                     # If BOTH vision AND text-only failed → skip listing
                     if api_key and provider == "nvidia" and assess is None:
-                        LOGGER.info("%s: SKIP (AI nicht verfügbar) — %s",
+                        LOGGER.info("%s: SKIP (Vision + Text-Fallback beide fehlgeschlagen) — %s",
                                     profile.name, item.title[:60])
                         return item.link, _skip
 
@@ -434,18 +455,21 @@ def scan_profiles(
 
                     # ── Guard 3b: Vinted deferred description fetch ───────────
                     # Only for Vinted listings where vision says functional=True.
-                    # Fetches the real description for regex verification.
-                    # Serialized with a lock + cache to stay under Vinted's rate limit.
+                    # If vision already confirmed the listing (vision_ok=True),
+                    # a missing description is acceptable — vision saw the photo.
                     if is_vinted and assess and assess.get("functional"):
                         fetched_imgs, fetched_desc = _vinted_fetch_throttled(item.link)
                         if fetched_desc:
                             item_desc = fetched_desc
+                            LOGGER.debug("%s: Vinted Beschreibung OK (%d Zeichen) — %s",
+                                         profile.name, len(fetched_desc), item.title[:50])
+                        elif vision_ok:
+                            # Vision saw the photo and approved — proceed without text desc
+                            LOGGER.info("%s: Vinted kein Text aber Vision OK — weiter — %s",
+                                        profile.name, item.title[:60])
                         else:
-                            # The DESCRIPTION must be verified — photos alone
-                            # don't count. "Won't turn on" stated only in text
-                            # is invisible to vision; a page that returned
-                            # images but no description text is unverified.
-                            LOGGER.info("%s: SKIP (Vinted Beschreibung nicht verifizierbar) — %s",
+                            # No vision, no description — not safe to buy blind
+                            LOGGER.info("%s: SKIP (Vinted: kein Text, kein Bild verifiziert) — %s",
                                         profile.name, item.title[:60])
                             return item.link, _skip
 
@@ -582,11 +606,28 @@ def scan_profiles(
                                       wirkaufens_prices or None, listing_extras or None)
         for item in active:
             all_active[item.link] = item
+
+        worth_it_count = sum(1 for ex in listing_extras.values() if ex.get("worth_it"))
+        skipped_count = sum(1 for ex in listing_extras.values() if not ex.get("worth_it"))
         LOGGER.info(
-            "%s: active=%s sold=%s/%s sold_per_month=%.1f demand=%s proxy=%s",
-            profile.name, len(active), metrics.accepted_count, metrics.raw_count,
+            "%s: active=%s worth-it=%s skipped=%s "
+            "sold=%s/%s sold_per_month=%.1f demand=%s proxy=%s",
+            profile.name, len(active), worth_it_count, skipped_count,
+            metrics.accepted_count, metrics.raw_count,
             metrics.sold_per_month, metrics.demand, redact_proxy_url(proxy_url) or "direct",
         )
+        if worth_it_count:
+            for link, ex in listing_extras.items():
+                if ex.get("worth_it"):
+                    LOGGER.info(
+                        "%s: WORTH IT — profit=+%.0f€ roi=%.0f%% cond=%s risk=%s — %s",
+                        profile.name,
+                        ex.get("condition_profit") or 0,
+                        (ex.get("condition_roi") or 0) * 100,
+                        ex.get("detected_condition", "?"),
+                        ex.get("ai_risk", "?"),
+                        next((i.title for i in active if i.link == link), link)[:60],
+                    )
     # Only record when at least one profile produced listings — recording an
     # empty scan would mark EVERY stored listing inactive and wipe the
     # dashboard after a transient network failure.
