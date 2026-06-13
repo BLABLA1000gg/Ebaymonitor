@@ -336,7 +336,7 @@ def ai_assess_listing_batch(
         title, desc = listings[i]
         lines.append(
             f"[{j+1}] Title: {title}"
-            + (f" | Desc: {desc[:400]}" if desc else "")
+            + (f" | Desc: {desc[:400]}" if desc.strip() else " | Desc: (keine Beschreibung – bitte nur anhand Titel bewerten)")
         )
 
     system_prompt = (
@@ -418,13 +418,26 @@ def ai_assess_listing_batch(
                 break
             i = uncached[j]
             title = listings[i][0]
-            d = {
-                "condition":   max(0, min(5, int(raw.get("condition", COND_GOOD)))),
-                "functional":  bool(raw.get("functional", True)),
-                "battery_ok":  bool(raw.get("battery_ok", True)),
-                "has_box":     bool(raw.get("has_box", False)),
-                "has_cable":   bool(raw.get("has_cable", False)),
-            }
+            # Model sometimes returns a bare integer instead of a dict
+            if isinstance(raw, (int, float)):
+                score = max(0, min(5, int(raw)))
+                d = {
+                    "condition":  score,
+                    "functional": score > 0,
+                    "battery_ok": True,
+                    "has_box":    False,
+                    "has_cable":  False,
+                }
+            elif isinstance(raw, dict):
+                d = {
+                    "condition":   max(0, min(5, int(raw.get("condition", COND_GOOD)))),
+                    "functional":  bool(raw.get("functional", True)),
+                    "battery_ok":  bool(raw.get("battery_ok", True)),
+                    "has_box":     bool(raw.get("has_box", False)),
+                    "has_cable":   bool(raw.get("has_cable", False)),
+                }
+            else:
+                continue
             _log.debug("Text-batch result[%d] %r: cond=%s func=%s",
                        i, title[:30], d["condition"], d["functional"])
             results[i] = d
@@ -1193,11 +1206,18 @@ def _image_to_b64(image_url: str) -> str | None:
     try:
         import base64
         from curl_cffi.requests import Session as CurlSession
+        # Referer must match the image CDN to avoid 403s
+        if "vinted." in image_url:
+            referer = "https://www.vinted.de/"
+        elif "kleinanzeigen.de" in image_url or "ebayimg" in image_url:
+            referer = "https://www.kleinanzeigen.de/"
+        else:
+            referer = "https://www.google.com/"
         with CurlSession(impersonate="chrome120") as s:
             r = s.get(image_url, timeout=10, headers={
                 "User-Agent": "Mozilla/5.0",
                 "Accept": "image/*,*/*",
-                "Referer": "https://www.vinted.de/",
+                "Referer": referer,
             })
             if r.status_code != 200 or not r.content:
                 _LOGGER_CD.debug("Image download %s: HTTP %s (size %s)",
