@@ -191,11 +191,31 @@
                     {{ deal.title }}
                     <span class="ext-icon" aria-hidden="true">↗</span>
                   </a>
+                  {% if deal.auction_end_time or deal.auction_time_left %}
+                    <div class="auction-countdown"
+                         data-end="{{ deal.auction_end_time or '' }}"
+                         data-timeleft="{{ deal.auction_time_left or '' }}"
+                         data-bids="{{ deal.auction_bid_count or 0 }}">
+                      <span class="auction-icon">🔨</span>
+                      <span class="auction-time">{{ deal.auction_time_left or 'Auktion' }}</span>
+                      {% if deal.auction_bid_count %}<span class="auction-bids">{{ deal.auction_bid_count }} Gebote</span>{% endif %}
+                    </div>
+                  {% endif %}
                   {% if deal.ai_reason %}
                     <div class="ai-reason">{{ deal.ai_reason }}</div>
                   {% endif %}
-                  <a href="{{ deal.link }}" target="_blank" rel="noopener"
-                     class="seen-btn" data-seen-link="{{ deal.link }}">Öffnen + gesehen</a>
+                  <div class="listing-actions">
+                    <a href="{{ deal.link }}" target="_blank" rel="noopener"
+                       class="seen-btn" data-seen-link="{{ deal.link }}">Öffnen + gesehen</a>
+                    {% if deal.worth_it %}
+                      <span class="feedback-btns" data-link="{{ deal.link }}">
+                        <button class="fb-btn fb-ok {{ 'fb-active' if deal.user_outcome == 'ok' }}"
+                                onclick="sendFeedback(this,'ok')" title="Gerät war OK">✓ OK</button>
+                        <button class="fb-btn fb-defekt {{ 'fb-active' if deal.user_outcome == 'defekt' }}"
+                                onclick="sendFeedback(this,'defekt')" title="Gerät war defekt">✗ Defekt</button>
+                      </span>
+                    {% endif %}
+                  </div>
                 </td>
 
                 {# Preis #}
@@ -536,6 +556,48 @@ fetch('/api/profiles/{{ selected_profile_id }}/trend')
       })
       .catch(() => {});
   }, 3000);
+})();
+</script>
+
+<script>
+// Feedback buttons (OK / Defekt)
+function sendFeedback(btn, outcome) {
+  const wrap = btn.closest('.feedback-btns');
+  const link = wrap.dataset.link;
+  fetch('/api/feedback', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({link, outcome}),
+  }).then(r => r.json()).then(() => {
+    wrap.querySelectorAll('.fb-btn').forEach(b => b.classList.remove('fb-active'));
+    btn.classList.add('fb-active');
+  });
+}
+
+// Auction countdown: update every 30s, highlight when < 2h
+(function() {
+  function updateCountdowns() {
+    document.querySelectorAll('.auction-countdown').forEach(el => {
+      const endStr = el.dataset.end;
+      const timeEl = el.querySelector('.auction-time');
+      if (!endStr || !timeEl) return;
+      const end = new Date(endStr);
+      const now = new Date();
+      const ms = end - now;
+      if (isNaN(ms) || ms < 0) { timeEl.textContent = 'Beendet'; return; }
+      const h = Math.floor(ms / 3600000);
+      const m = Math.floor((ms % 3600000) / 60000);
+      const s = Math.floor((ms % 60000) / 1000);
+      if (h > 0) {
+        timeEl.textContent = `${h}h ${m}m`;
+      } else {
+        timeEl.textContent = `${m}m ${s}s`;
+        el.classList.add('ending-soon');
+      }
+    });
+  }
+  updateCountdowns();
+  setInterval(updateCountdowns, 30000);
 })();
 </script>
 

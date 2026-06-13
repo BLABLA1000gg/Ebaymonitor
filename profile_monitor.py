@@ -584,7 +584,105 @@ def scan_profiles(
     # dashboard after a transient network failure.
     events = (store.record_scan(list(all_active.values()))
               if successful_profiles and all_active else [])
+
+    # Telegram alerts for new worth-it deals + auctions ending soon
+    if settings and (settings.telegram_bot_token and settings.telegram_chat_id):
+        _send_telegram_alerts(store, settings, all_active)
+
     return len(profiles), len(events)
+
+
+_ALERTED_LINKS: set[str] = set()  # in-memory dedup: don't re-alert same deal each scan
+
+
+def _send_telegram_alerts(store, settings, all_active: dict) -> None:
+    """Send Telegram messages for new worth-it deals and auctions ending within 2h."""
+    try:
+        data = store.dashboard()
+        deals = data.get("deals") or []
+        worth_it = [d for d in deals if d.get("worth_it")]
+        if not worth_it:
+            return
+
+        token = settings.telegram_bot_token.strip()
+        chat_id = settings.telegram_chat_id.strip()
+        api_url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+        import requests as _req
+        session = _req.Session()
+
+        for deal in worth_it:
+            link = deal.get("link", "")
+            profit = deal.get("condition_profit")
+            roi = deal.get("condition_roi")
+            title = deal.get("title", "")[:60]
+            price = deal.get("current_price", "?")
+            risk = deal.get("ai_risk") or "–"
+            end_time = deal.get("auction_end_time")
+            time_left = deal.get("auction_time_left")
+            bid_count = deal.get("auction_bid_count")
+
+            is_auction = bool(end_time or time_left)
+            alert_key = f"{link}:{end_time or 'bin'}"
+
+            # Always alert auctions ending within 2h (time-sensitive)
+            # For BIN deals: only alert once per link
+            if alert_key in _ALERTED_LINKS:
+                continue
+            if is_auction and not _auction_ends_within_2h(time_left):
+                continue
+
+            profit_str = f"+{profit:.0f}€" if profit else "?"
+            roi_str = f"{roi*100:.0f}%" if roi else "?"
+
+            if is_auction:
+                auction_info = ""
+                if time_left:
+                    auction_info += f"\n⏰ *Endet in:* {time_left}"
+                if bid_count is not None:
+                    auction_info += f"\n🔨 *Gebote:* {bid_count}"
+                # Max-bid recommendation: buyback price - shipping - fee (conservative)
+                max_bid_hint = ""
+                if profit and deal.get("current_price"):
+                    try:
+                        current = float(deal["current_price"])
+                        max_safe = current + float(profit) * 0.7  # 70% profit buffer
+                        max_bid_hint = f"\n💡 *Max-Gebot empfohlen:* ~{max_safe:.0f}€"
+                    except Exception:
+                        pass
+                text = (
+                    f"🔨 *AUKTION ENDET BALD — WORTH IT*\n"
+                    f"*{title}*\n"
+                    f"💶 Aktuell: {price}€ | Profit: {profit_str} | ROI: {roi_str}\n"
+                    f"⚠️ Risiko: {risk}"
+                    f"{auction_info}{max_bid_hint}\n"
+                    f"[→ Zur Auktion]({link})"
+                )
+            else:
+                text = (
+                    f"✅ *NEUER DEAL — WORTH IT*\n"
+                    f"*{title}*\n"
+                    f"💶 Preis: {price}€ | Profit: {profit_str} | ROI: {roi_str}\n"
+                    f"⚠️ Risiko: {risk}\n"
+                    f"[→ Zum Listing]({link})"
+                )
+
+            try:
+                resp = session.post(api_url, json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": False,
+                }, timeout=10)
+                if resp.status_code == 200:
+                    _ALERTED_LINKS.add(alert_key)
+                    LOGGER.info("Telegram alert sent: %s", title)
+                else:
+                    LOGGER.warning("Telegram alert failed (%s): %s", resp.status_code, resp.text[:200])
+            except Exception as e:
+                LOGGER.warning("Telegram send error: %s", e)
+    except Exception as e:
+        LOGGER.warning("_send_telegram_alerts failed: %s", e)
 
 
 def _no_auctions(url: str) -> str:

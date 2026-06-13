@@ -87,6 +87,9 @@ def create_app(database_path: str | Path | None = None) -> Flask:
                     nvidia_api_key=(request.form.get("nvidia_api_key", "").strip()
                                     or stored.nvidia_api_key),
                     ai_provider=request.form.get("ai_provider", "none").strip(),
+                    telegram_bot_token=(request.form.get("telegram_bot_token", "").strip()
+                                        or stored.telegram_bot_token),
+                    telegram_chat_id=request.form.get("telegram_chat_id", "").strip(),
                 )
                 ss.save(new_settings)
                 # Apply new interval to running controller
@@ -156,6 +159,23 @@ def create_app(database_path: str | Path | None = None) -> Flask:
             return jsonify([])
         with store() as database:
             return jsonify(database.price_history(link))
+
+    @app.post("/api/feedback")
+    def listing_feedback():
+        """Record user outcome for a listing (ok / defekt)."""
+        data = request.get_json(silent=True) or {}
+        link = (data.get("link") or "").strip()
+        outcome = (data.get("outcome") or "").strip()
+        if not link or outcome not in ("ok", "defekt"):
+            return jsonify({"error": "invalid"}), 400
+        with store() as database:
+            database.set_user_outcome(link, outcome)
+        return jsonify({"ok": True})
+
+    @app.get("/api/ai-accuracy")
+    def ai_accuracy():
+        with store() as database:
+            return jsonify(database.ai_accuracy())
 
     @app.get("/api/buyback/search")
     def buyback_search():

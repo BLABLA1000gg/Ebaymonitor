@@ -37,6 +37,10 @@ _MIGRATIONS = [
     "ALTER TABLE profile_listings ADD COLUMN condition_roi TEXT",
     "ALTER TABLE profile_listings ADD COLUMN ai_risk TEXT",
     "ALTER TABLE profile_listings ADD COLUMN ai_reason TEXT",
+    "ALTER TABLE profile_listings ADD COLUMN auction_end_time TEXT",
+    "ALTER TABLE profile_listings ADD COLUMN auction_bid_count INTEGER",
+    "ALTER TABLE profile_listings ADD COLUMN auction_time_left TEXT",
+    "ALTER TABLE profile_listings ADD COLUMN user_outcome TEXT",  # 'ok' | 'defekt' | NULL
 ]
 
 
@@ -188,14 +192,17 @@ class MonitorStore:
             for item in active:
                 ex = extras.get(item.link, {})
                 self.connection.execute(
-                    "INSERT INTO profile_listings(profile_id,link,deal_score,clevertronic_prices,zoxs_prices,wirkaufens_prices,detected_condition,worth_it,condition_profit,condition_roi,ai_risk,ai_reason,last_seen) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "INSERT INTO profile_listings(profile_id,link,deal_score,clevertronic_prices,zoxs_prices,wirkaufens_prices,detected_condition,worth_it,condition_profit,condition_roi,ai_risk,ai_reason,auction_end_time,auction_bid_count,auction_time_left,last_seen) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(profile_id,link) DO UPDATE SET "
                     "deal_score=excluded.deal_score,clevertronic_prices=excluded.clevertronic_prices,"
                     "zoxs_prices=excluded.zoxs_prices,wirkaufens_prices=excluded.wirkaufens_prices,"
                     "detected_condition=excluded.detected_condition,worth_it=excluded.worth_it,"
                     "condition_profit=excluded.condition_profit,condition_roi=excluded.condition_roi,"
                     "ai_risk=excluded.ai_risk,ai_reason=excluded.ai_reason,"
+                    "auction_end_time=excluded.auction_end_time,"
+                    "auction_bid_count=excluded.auction_bid_count,"
+                    "auction_time_left=excluded.auction_time_left,"
                     "last_seen=excluded.last_seen",
                     (profile.id, item.link, _decimal(deal_score(item.price, metrics.median)),
                      ct_json, zoxs_json, wkfs_json,
@@ -203,6 +210,7 @@ class MonitorStore:
                      str(ex["condition_profit"]) if ex.get("condition_profit") is not None else None,
                      str(ex["condition_roi"]) if ex.get("condition_roi") is not None else None,
                      ex.get("ai_risk"), ex.get("ai_reason"),
+                     item.end_time, item.bid_count, item.time_left,
                      now),
                 )
 
@@ -217,7 +225,8 @@ class MonitorStore:
             raw_deals = self.connection.execute(
                 "SELECT l.*,pl.deal_score,pl.clevertronic_prices,pl.zoxs_prices,pl.wirkaufens_prices,"
                 "pl.detected_condition,pl.worth_it,pl.condition_profit,pl.condition_roi,"
-                "pl.ai_risk,pl.ai_reason "
+                "pl.ai_risk,pl.ai_reason,"
+                "pl.auction_end_time,pl.auction_bid_count,pl.auction_time_left,pl.user_outcome "
                 "FROM profile_listings pl JOIN listings l ON l.link=pl.link "
                 "WHERE pl.profile_id=? AND l.active=1 "
                 "ORDER BY pl.worth_it DESC, CAST(pl.deal_score AS REAL) DESC LIMIT 50",
@@ -263,6 +272,10 @@ class MonitorStore:
                 d["condition_profit"] = float(cp) if cp else None
                 cr = row["condition_roi"] if "condition_roi" in keys else None
                 d["condition_roi"] = float(cr) if cr else None
+                d["auction_end_time"] = row["auction_end_time"] if "auction_end_time" in row.keys() else None
+                d["auction_bid_count"] = row["auction_bid_count"] if "auction_bid_count" in row.keys() else None
+                d["auction_time_left"] = row["auction_time_left"] if "auction_time_left" in row.keys() else None
+                d["user_outcome"] = row["user_outcome"] if "user_outcome" in row.keys() else None
                 deals.append(d)
 
         deal_list = deals or []
@@ -286,6 +299,37 @@ class MonitorStore:
             worth_counts[row["profile_id"]] = row["n"]
 
         return {"profiles":profiles,"selected_profile_id":selected,"snapshot":dict(snapshot) if snapshot else None,"trend":[dict(x) for x in trend or []],"deals":deal_list,"deal_summary":summary,"profile_worth_counts":worth_counts}
+
+    def set_user_outcome(self, link: str, outcome: str) -> None:
+        """Record user feedback: 'ok' or 'defekt' for a listing."""
+        if outcome not in ("ok", "defekt"):
+            return
+        with self.connection:
+            self.connection.execute(
+                "UPDATE profile_listings SET user_outcome=? WHERE link=?",
+                (outcome, link),
+            )
+
+    def ai_accuracy(self) -> dict:
+        """Return KI accuracy stats based on user feedback."""
+        rows = self.connection.execute(
+            "SELECT ai_risk, user_outcome, COUNT(*) as n "
+            "FROM profile_listings "
+            "WHERE user_outcome IS NOT NULL "
+            "GROUP BY ai_risk, user_outcome"
+        ).fetchall()
+        total = sum(r["n"] for r in rows)
+        correct = sum(r["n"] for r in rows if
+                      (r["ai_risk"] != "hoch" and r["user_outcome"] == "ok") or
+                      (r["ai_risk"] == "hoch" and r["user_outcome"] == "defekt"))
+        defekt_count = sum(r["n"] for r in rows if r["user_outcome"] == "defekt")
+        ok_count = sum(r["n"] for r in rows if r["user_outcome"] == "ok")
+        return {
+            "total": total,
+            "ok": ok_count,
+            "defekt": defekt_count,
+            "accuracy_pct": round(100 * correct / total) if total else None,
+        }
 
     def price_history(self, link):
         return [dict(row) for row in self.connection.execute("SELECT price,observed_at FROM price_history WHERE link=? ORDER BY observed_at", (link,))]

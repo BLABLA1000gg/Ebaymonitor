@@ -28,6 +28,8 @@ _DEFAULTS: dict[str, str] = {
     "deepseek_api_key":       "",
     "nvidia_api_key":         "",
     "ai_provider":            "none",   # "none" | "deepseek" | "nvidia"
+    "telegram_bot_token":     "",
+    "telegram_chat_id":       "",
 }
 
 
@@ -44,6 +46,8 @@ class AppSettings:
     deepseek_api_key: str = ""
     nvidia_api_key: str = ""
     ai_provider: str = "none"   # "none" | "deepseek" | "nvidia"
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
 
 
 class SettingsStore:
@@ -90,6 +94,8 @@ class SettingsStore:
             deepseek_api_key=get("deepseek_api_key"),
             nvidia_api_key=get("nvidia_api_key"),
             ai_provider=provider,
+            telegram_bot_token=get("telegram_bot_token"),
+            telegram_chat_id=get("telegram_chat_id"),
         )
 
     def save(self, settings: AppSettings) -> None:
@@ -105,6 +111,8 @@ class SettingsStore:
             ("deepseek_api_key",       settings.deepseek_api_key),
             ("nvidia_api_key",         settings.nvidia_api_key),
             ("ai_provider",            settings.ai_provider),
+            ("telegram_bot_token",     settings.telegram_bot_token),
+            ("telegram_chat_id",       settings.telegram_chat_id),
         ]
         with self._conn:
             self._conn.executemany(

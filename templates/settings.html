@@ -34,6 +34,21 @@
       <span class="hint">Leer lassen, um Discord-Benachrichtigungen zu deaktivieren.</span>
     </label>
 
+    <label class="wide">
+      Telegram Bot Token
+      <input type="password" name="telegram_bot_token" autocomplete="off"
+             placeholder="{{ '•••• gespeichert — leer lassen zum Behalten' if s.telegram_bot_token else '1234567890:AAF...' }}">
+      <span class="hint">Bot erstellen via @BotFather auf Telegram.</span>
+    </label>
+
+    <label class="wide">
+      Telegram Chat ID
+      <input type="text" name="telegram_chat_id"
+             value="{{ s.telegram_chat_id }}"
+             placeholder="z.B. -1001234567890 oder deine User-ID">
+      <span class="hint">Chat-ID via @userinfobot herausfinden. Bei Gruppen mit Minuszeichen.</span>
+    </label>
+
     <label class="check wide">
       <input type="checkbox" name="notify_existing" {% if s.notify_existing %}checked{% endif %}>
       Auch über Anzeigen benachrichtigen, die beim ersten Scan bereits existieren
