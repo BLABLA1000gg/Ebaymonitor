@@ -317,8 +317,22 @@ def scan_profiles(
                 _skip = {"detected_condition": "Defekt", "worth_it": False,
                          "condition_profit": None, "condition_roi": None}
                 try:
+                    # ── Listing entry log ────────────────────────────────────
+                    _platform = (
+                        "vinted" if item.link and "vinted." in item.link else
+                        "ka" if item.link and "kleinanzeigen.de" in item.link else
+                        "ebay" if item.link and "ebay." in item.link else "other"
+                    )
+                    LOGGER.debug(
+                        "%s [%s] START — price=€%s cond=%s img=%s desc_len=%d — %s",
+                        profile.name, _platform,
+                        item.price, item.condition or "–",
+                        "ja" if item.image_url else "nein",
+                        len(getattr(item, "description", "") or ""),
+                        item.title[:70],
+                    )
+
                     # ── Guard 0a: unrealistic price ──────────────────────────
-                    # Prices below €20 are placeholder/auction/error listings
                     if not item.price or item.price < Decimal("20"):
                         LOGGER.info("%s: SKIP (Preis zu niedrig €%s) — %s",
                                     profile.name, item.price, item.title[:50])
@@ -337,7 +351,6 @@ def scan_profiles(
                     is_ka = item.link and "kleinanzeigen.de" in item.link
 
                     # ── Guard 1b: title-only regex (no network needed) ───────
-                    # Catch obvious title defects before spending a network request
                     title_cond = detect_condition(item.title, description="")
                     if title_cond == COND_BROKEN:
                         LOGGER.info("%s: SKIP (defekt-keywords Titel) — %s",
@@ -345,28 +358,33 @@ def scan_profiles(
                         return item.link, _skip
 
                     # ── Guard 1c: fetch description (KA only; Vinted deferred) ──
-                    # KA descriptions are fetched upfront — no aggressive bot detection.
-                    # Vinted: description fetch is DEFERRED until after AI vision says
-                    # the listing looks promising. Vinted blocks IP after catalog fetch,
-                    # so we conserve the rate-limit budget for listings that pass vision.
                     fetch_ok = False
                     if item.link and is_ka:
+                        _t0 = time.monotonic()
                         try:
                             fetched_imgs, fetched_desc = _fetch_ka_details(item.link)
+                            _elapsed = time.monotonic() - _t0
+                            LOGGER.debug(
+                                "%s [ka] fetch — imgs=%d desc_len=%d elapsed=%.2fs — %s",
+                                profile.name, len(fetched_imgs), len(fetched_desc),
+                                _elapsed, item.title[:50],
+                            )
                             if fetched_imgs or fetched_desc:
                                 if fetched_desc:
                                     item_desc = fetched_desc
                                 fetch_ok = True
+                                LOGGER.debug(
+                                    "%s [ka] desc snippet: %s",
+                                    profile.name, fetched_desc[:120].replace("\n", " "),
+                                )
                             else:
-                                LOGGER.debug("%s: KA fetch returned empty for %s",
-                                             profile.name, item.title[:50])
+                                LOGGER.info("%s [ka] fetch leer (%.2fs) — %s",
+                                            profile.name, _elapsed, item.title[:50])
                         except Exception as e:
-                            LOGGER.debug("%s: KA fetch error for %s: %s",
-                                         profile.name, item.title[:50], e)
+                            LOGGER.info("%s [ka] fetch Fehler (%.2fs) %s — %s",
+                                        profile.name, time.monotonic() - _t0,
+                                        type(e).__name__, item.title[:50])
 
-                    # KA listings require a verified description before AI assessment.
-                    # KA has no bot detection issue — an empty fetch means a transient
-                    # network error. Skip rather than risk buying without verification.
                     if is_ka and not fetch_ok:
                         LOGGER.info("%s: SKIP (KA Beschreibung nicht abrufbar) — %s",
                                     profile.name, item.title[:60])
@@ -395,11 +413,14 @@ def scan_profiles(
                     assess = None
                     vision_ok = False
                     if api_key and provider == "nvidia":
-                        LOGGER.debug("%s: Vision-Assessment — img=%s desc_len=%d — %s",
-                                     profile.name,
-                                     "ja" if item.image_url else "nein",
-                                     len(item_desc),
-                                     item.title[:50])
+                        LOGGER.debug(
+                            "%s: Vision-Start — img_url=%s desc_len=%d link=%s",
+                            profile.name,
+                            (item.image_url or "–")[:80],
+                            len(item_desc),
+                            item.link[-60:],
+                        )
+                        _v0 = time.monotonic()
                         try:
                             assess = ai_assess_listing_full(
                                 title=item.title,
@@ -410,38 +431,53 @@ def scan_profiles(
                                 provider=provider,
                                 max_images=1,
                             )
+                            _v_elapsed = time.monotonic() - _v0
                             if assess is not None:
                                 vision_ok = True
-                                LOGGER.debug("%s: Vision OK — cond=%s func=%s risk=%s — %s",
-                                             profile.name, assess.get("condition"),
-                                             assess.get("functional"), assess.get("risk"),
-                                             item.title[:50])
+                                LOGGER.info(
+                                    "%s: Vision OK (%.2fs) — cond=%s func=%s bat=%s risk=%s reason=%s — %s",
+                                    profile.name, _v_elapsed,
+                                    assess.get("condition"), assess.get("functional"),
+                                    assess.get("battery_ok"), assess.get("risk"),
+                                    (assess.get("reason") or "")[:60],
+                                    item.title[:50],
+                                )
                             else:
-                                LOGGER.info("%s: Vision None (kein Bild oder Fehler) — %s",
-                                            profile.name, item.title[:60])
+                                LOGGER.info("%s: Vision None (%.2fs) — img=%s — %s",
+                                            profile.name, _v_elapsed,
+                                            (item.image_url or "–")[:60],
+                                            item.title[:60])
                         except Exception as ve:
-                            LOGGER.warning("%s: Vision Exception %s — %s: %s",
-                                           profile.name, item.title[:40], type(ve).__name__, ve)
+                            LOGGER.warning("%s: Vision Exception (%.2fs) %s — %s: %s",
+                                           profile.name, time.monotonic() - _v0,
+                                           item.title[:40], type(ve).__name__, ve)
 
                         # Fallback: text-only when vision returned None
                         if assess is None:
-                            LOGGER.debug("%s: Text-Fallback für — %s", profile.name, item.title[:50])
+                            LOGGER.info("%s: Text-Fallback — title=%s desc_len=%d",
+                                        profile.name, item.title[:50], len(item_desc))
+                            _tb0 = time.monotonic()
                             try:
                                 batch = ai_assess_listing_batch(
                                     [(item.title, item_desc)],
                                     api_key=api_key, provider=provider,
                                 )
+                                _tb_elapsed = time.monotonic() - _tb0
                                 if batch and batch[0] is not None:
                                     assess = batch[0]
-                                    LOGGER.debug("%s: Text-Fallback OK — cond=%s func=%s — %s",
-                                                 profile.name, assess.get("condition"),
-                                                 assess.get("functional"), item.title[:50])
+                                    LOGGER.info(
+                                        "%s: Text-Fallback OK (%.2fs) — cond=%s func=%s — %s",
+                                        profile.name, _tb_elapsed,
+                                        assess.get("condition"), assess.get("functional"),
+                                        item.title[:50],
+                                    )
                                 else:
-                                    LOGGER.warning("%s: Text-Fallback None — %s",
-                                                   profile.name, item.title[:60])
+                                    LOGGER.warning("%s: Text-Fallback None (%.2fs) — %s",
+                                                   profile.name, _tb_elapsed, item.title[:60])
                             except Exception as e:
-                                LOGGER.warning("%s: Text-Fallback Fehler %s — %s: %s",
-                                               profile.name, item.title[:40], type(e).__name__, e)
+                                LOGGER.warning("%s: Text-Fallback Fehler (%.2fs) %s — %s: %s",
+                                               profile.name, time.monotonic() - _tb0,
+                                               item.title[:40], type(e).__name__, e)
 
                     # If BOTH vision AND text-only failed → skip listing
                     if api_key and provider == "nvidia" and assess is None:
@@ -979,7 +1015,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run all enabled dashboard search profiles")
     parser.add_argument("--once", action="store_true", help="Run one profile scan and exit")
     args = parser.parse_args()
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+
+    console_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)  # root captures everything
+
+    # Console — INFO by default (or LOG_LEVEL override)
+    ch = logging.StreamHandler()
+    ch.setLevel(getattr(logging, console_level, logging.INFO))
+    ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    root.addHandler(ch)
+
+    # File — always DEBUG, full detail for post-scan analysis
+    from logging.handlers import RotatingFileHandler
+    log_path = Path(os.getenv("DATABASE_PATH", "ebay_monitor.db")).with_suffix(".debug.log")
+    fh = RotatingFileHandler(log_path, maxBytes=20 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    root.addHandler(fh)
+
+    LOGGER.info("Debug log → %s", log_path)
     run(Path(os.getenv("DATABASE_PATH", "ebay_monitor.db")), args.once)
 
 

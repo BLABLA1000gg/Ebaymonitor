@@ -364,10 +364,16 @@ def ai_assess_listing_batch(
     )
 
     import logging as _logging
+    import time as _time
     _log = _logging.getLogger(__name__)
     user_msg = "\n".join(lines)
-    _log.debug("Text-batch: provider=%s listings=%d uncached=%d", provider, len(listings), len(uncached))
+    _log.debug(
+        "Text-batch START — provider=%s total=%d uncached=%d",
+        provider, len(listings), len(uncached),
+    )
+    _log.debug("Text-batch PROMPT:\n%s", user_msg[:1000])
 
+    _tb0 = _time.monotonic()
     try:
         if provider == "nvidia":
             from openai import OpenAI
@@ -383,7 +389,8 @@ def ai_assess_listing_batch(
                 stream=False,
             )
             text = resp.choices[0].message.content.strip()
-            _log.debug("Text-batch NVIDIA OK: %d chars", len(text))
+            _log.debug("Text-batch NVIDIA OK (%.2fs) %d chars — RAW: %s",
+                       _time.monotonic() - _tb0, len(text), text[:400])
         elif provider == "deepseek":
             import requests as _req
             r = _req.post(
@@ -401,16 +408,19 @@ def ai_assess_listing_batch(
                 timeout=15,
             )
             if r.status_code != 200:
-                _log.warning("Text-batch DeepSeek HTTP %s: %s", r.status_code, r.text[:200])
+                _log.warning("Text-batch DeepSeek HTTP %s (%.2fs): %s",
+                             r.status_code, _time.monotonic() - _tb0, r.text[:300])
             text = r.json()["choices"][0]["message"]["content"].strip()
-            _log.debug("Text-batch DeepSeek OK: %d chars", len(text))
+            _log.debug("Text-batch DeepSeek OK (%.2fs) %d chars — RAW: %s",
+                       _time.monotonic() - _tb0, len(text), text[:400])
         else:
             text = ""
 
         # Parse JSON array from response
         m = re.search(r"\[.*\]", text, re.DOTALL)
         if not m:
-            _log.warning("Text-batch: no JSON array in response: %s", text[:200])
+            _log.warning("Text-batch: no JSON array in response (%.2fs): %s",
+                         _time.monotonic() - _tb0, text[:300])
         parsed = _json.loads(m.group()) if m else []
 
         for j, raw in enumerate(parsed):
@@ -446,8 +456,9 @@ def ai_assess_listing_batch(
             _cond_cache[k] = d["condition"]
 
     except Exception as e:
-        _log.warning("Text-batch FAIL (provider=%s, %d listings): %s: %s",
-                     provider, len(uncached), type(e).__name__, str(e)[:300])
+        _log.warning("Text-batch FAIL (%.2fs provider=%s %d listings): %s: %s",
+                     _time.monotonic() - _tb0, provider, len(uncached),
+                     type(e).__name__, str(e)[:300])
 
     return [r if r is not None else default.copy() for r in results]
 
@@ -907,24 +918,37 @@ def _fetch_ka_details(url: str) -> tuple[list[str], str]:
     image URLs directly. Falls back to the hardened HTML scrape (shared keep-alive
     session, one retry, JSON-LD ImageObject fallback) if the gateway fails.
     """
+    import time as _time
     from bs4 import BeautifulSoup
     import json as _json
 
+    _t0 = _time.monotonic()
+    _LOGGER_CD.debug("KA fetch START — %s", url[-80:])
     try:
         from marketplaces import fetch_kleinanzeigen_ad_detail
 
         imgs, description = fetch_kleinanzeigen_ad_detail(url)
         imgs = [_to_hires(u) for u in imgs]
+        _LOGGER_CD.debug(
+            "KA API OK (%.2fs) — imgs=%d desc_len=%d — %s",
+            _time.monotonic() - _t0, len(imgs), len(description), url[-60:],
+        )
         if imgs or description:
             return imgs, description
-    except Exception:
-        pass
+        _LOGGER_CD.debug("KA API leer — fallback auf HTML — %s", url[-60:])
+    except Exception as e:
+        _LOGGER_CD.debug("KA API Fehler (%.2fs) %s — %s — HTML-Fallback",
+                         _time.monotonic() - _t0, type(e).__name__, url[-60:])
 
     last_err: Exception | None = None
     for attempt in range(2):
+        _ta = _time.monotonic()
         try:
+            _LOGGER_CD.debug("KA HTML attempt=%d — %s", attempt + 1, url[-60:])
             s = _ka_session()
             r = s.get(url, headers={"Accept-Language": "de-DE,de;q=0.9"}, timeout=12)
+            _LOGGER_CD.debug("KA HTML HTTP %s (%.2fs) size=%d — %s",
+                             r.status_code, _time.monotonic() - _ta, len(r.content), url[-60:])
             soup = BeautifulSoup(r.text, "html.parser")
             imgs = []
             for img in soup.find_all("img"):
@@ -947,14 +971,21 @@ def _fetch_ka_details(url: str) -> tuple[list[str], str]:
             description = desc_el.get_text(" ", strip=True) if desc_el else ""
             # Deduplicate images, keep order
             imgs = list(dict.fromkeys(imgs))
+            _LOGGER_CD.debug(
+                "KA HTML parse — imgs=%d desc_len=%d — first_img=%s",
+                len(imgs), len(description), (imgs[0][:70] if imgs else "–"),
+            )
             if imgs or description:
+                _LOGGER_CD.debug("KA fetch DONE (%.2fs total) — %s",
+                                 _time.monotonic() - _t0, url[-60:])
                 return imgs, description
         except Exception as e:
             last_err = e
+            _LOGGER_CD.debug("KA HTML attempt=%d Fehler (%.2fs) %s: %s",
+                             attempt + 1, _time.monotonic() - _ta, type(e).__name__, e)
             _ka_reset_session()
-    if last_err is not None:
-        import logging
-        logging.getLogger("condition_detect").warning("KA detail fetch failed for %s: %r", url[-50:], last_err)
+    _LOGGER_CD.warning("KA fetch FAIL (%.2fs) — last_err=%r — %s",
+                       _time.monotonic() - _t0, last_err, url[-60:])
     return [], ""
 
 
@@ -977,13 +1008,19 @@ def _fetch_vinted_details(url: str) -> tuple[list[str], str]:
     sequential requests than the HTML item pages (~26/IP burst limit).
     Falls back to the legacy HTML-regex scrape if the API fails.
     """
+    import time as _time
+    _t0 = _time.monotonic()
+    _LOGGER_CD.debug("Vinted fetch START — %s", url[-80:])
+
     id_match = _VINTED_ITEM_ID_RE.search(url)
     if id_match:
         try:
             from marketplaces import vinted_api_get
 
             item_id = id_match.group(1)
+            _LOGGER_CD.debug("Vinted API — item_id=%s", item_id)
             r = vinted_api_get(f"/api/v2/items/{item_id}/plugins/sidebar")
+            _LOGGER_CD.debug("Vinted sidebar HTTP %s (%.2fs)", r.status_code, _time.monotonic() - _t0)
             if r.status_code != 200:
                 raise RuntimeError(f"sidebar HTTP {r.status_code}")
             description = ""
@@ -1012,6 +1049,7 @@ def _fetch_vinted_details(url: str) -> tuple[list[str], str]:
                     description += f"\n[Vinted-Attribut: {sizes.pop()} GB]"
 
             rp = vinted_api_get(f"/api/v2/items/{item_id}/photos")
+            _LOGGER_CD.debug("Vinted photos HTTP %s (%.2fs)", rp.status_code, _time.monotonic() - _t0)
             imgs: list[str] = []
             if rp.status_code == 200:
                 for photo in rp.json().get("photos", []):
@@ -1019,12 +1057,22 @@ def _fetch_vinted_details(url: str) -> tuple[list[str], str]:
                     if u:
                         imgs.append(u)
 
+            _LOGGER_CD.debug(
+                "Vinted API OK (%.2fs) — imgs=%d desc_len=%d — first_img=%s",
+                _time.monotonic() - _t0, len(imgs), len(description),
+                (imgs[0][:70] if imgs else "–"),
+            )
             if description or imgs:
                 return imgs, description
-        except Exception:
-            pass
+            _LOGGER_CD.debug("Vinted API leer — HTML-Fallback")
+        except Exception as e:
+            _LOGGER_CD.debug("Vinted API Fehler (%.2fs) %s: %s — HTML-Fallback",
+                             _time.monotonic() - _t0, type(e).__name__, e)
 
-    return _fetch_vinted_details_html(url)
+    result = _fetch_vinted_details_html(url)
+    _LOGGER_CD.debug("Vinted HTML DONE (%.2fs) — imgs=%d desc_len=%d",
+                     _time.monotonic() - _t0, len(result[0]), len(result[1]))
+    return result
 
 
 def _fetch_vinted_details_html(url: str) -> tuple[list[str], str]:
@@ -1213,26 +1261,31 @@ def _image_to_b64(image_url: str) -> str | None:
             referer = "https://www.kleinanzeigen.de/"
         else:
             referer = "https://www.google.com/"
+        _LOGGER_CD.debug("Image DL — url=%s referer=%s", image_url[:80], referer)
+        import time as _time
+        _t0 = _time.monotonic()
         with CurlSession(impersonate="chrome120") as s:
             r = s.get(image_url, timeout=10, headers={
                 "User-Agent": "Mozilla/5.0",
                 "Accept": "image/*,*/*",
                 "Referer": referer,
             })
+            _elapsed = _time.monotonic() - _t0
+            mime = r.headers.get("Content-Type", "?").split(";")[0].strip()
             if r.status_code != 200 or not r.content:
-                _LOGGER_CD.debug("Image download %s: HTTP %s (size %s)",
-                                 image_url[:60], r.status_code, len(r.content))
+                _LOGGER_CD.debug("Image DL FAIL — HTTP %s mime=%s size=%d elapsed=%.2fs — %s",
+                                 r.status_code, mime, len(r.content), _elapsed, image_url[:80])
                 return None
-            mime = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
             if not mime.startswith("image/"):
-                _LOGGER_CD.debug("Image download %s: non-image content-type %s",
-                                 image_url[:60], mime)
+                _LOGGER_CD.debug("Image DL FAIL — non-image mime=%s HTTP %s — %s",
+                                 mime, r.status_code, image_url[:80])
                 return None
             b64 = base64.b64encode(r.content).decode()
-            _LOGGER_CD.debug("Image download %s: OK %s bytes", image_url[:60], len(r.content))
+            _LOGGER_CD.debug("Image DL OK — %d bytes mime=%s b64_len=%d elapsed=%.2fs — %s",
+                             len(r.content), mime, len(b64), _elapsed, image_url[:80])
             return f"data:{mime};base64,{b64}"
     except Exception as e:
-        _LOGGER_CD.debug("Image download %s: exception %s", image_url[:60], e)
+        _LOGGER_CD.debug("Image DL exception — %s — %s", image_url[:80], e)
         return None
 
 
@@ -1358,6 +1411,10 @@ def ai_assess_listing_full(
 
     # NVIDIA vision model supports at most 1 image per prompt
     images = images[:1]
+    _LOGGER_CD.debug(
+        "Vision image list — count=%d fetched_desc_len=%d img=%s",
+        len(images), len(fetched_desc), (images[0][:80] if images else "–"),
+    )
 
     # Use fetched description if caller didn't provide one
     if not description and fetched_desc:
@@ -1426,7 +1483,13 @@ def ai_assess_listing_full(
     )})
 
     img_size_kb = len(content[0].get("image_url", {}).get("url", "")) // 1024 if content else 0
-    _LOGGER_CD.debug("Vision call: title=%r images=1 payload_kb~=%s", title[:40], img_size_kb)
+    _LOGGER_CD.debug(
+        "Vision CALL — model=%s images_in_content=%d payload_kb~=%d title=%r",
+        _VISION_MODEL, sum(1 for c in content if c.get("type") == "image_url"),
+        img_size_kb, title[:50],
+    )
+    import time as _time
+    _v0 = _time.monotonic()
     try:
         from openai import OpenAI
         client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key, timeout=40, max_retries=0)
@@ -1437,10 +1500,13 @@ def ai_assess_listing_full(
             max_tokens=160,
             stream=False,
         )
+        _v_elapsed = _time.monotonic() - _v0
         text = resp.choices[0].message.content.strip()
+        _LOGGER_CD.debug("Vision RAW (%.2fs) — response=%s", _v_elapsed, text[:300])
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if not m:
-            _LOGGER_CD.warning("Vision: no JSON in response for %r: %s", title[:40], text[:120])
+            _LOGGER_CD.warning("Vision no JSON (%.2fs) — title=%r response=%s",
+                               _v_elapsed, title[:40], text[:200])
             return None
         raw = _json.loads(m.group())
         risk = str(raw.get("risk", "")).strip().lower()
@@ -1453,13 +1519,16 @@ def ai_assess_listing_full(
             "risk":       risk if risk in ("niedrig", "mittel", "hoch") else "mittel",
             "reason":     str(raw.get("reason", "")).strip()[:120],
         }
-        _LOGGER_CD.debug("Vision OK: %r → cond=%s func=%s risk=%s reason=%s",
-                         title[:40], result["condition"], result["functional"],
-                         result["risk"], result["reason"])
+        _LOGGER_CD.debug(
+            "Vision PARSED (%.2fs) — cond=%s func=%s bat=%s risk=%s reason=%s — %r",
+            _v_elapsed, result["condition"], result["functional"],
+            result["battery_ok"], result["risk"], result["reason"], title[:40],
+        )
         _assess_cache[cache_key] = result
         return result
     except Exception as e:
-        _LOGGER_CD.warning("Vision FAIL: %r → %s: %s", title[:40], type(e).__name__, str(e)[:200])
+        _LOGGER_CD.warning("Vision FAIL (%.2fs) — %r — %s: %s",
+                           _time.monotonic() - _v0, title[:40], type(e).__name__, str(e)[:300])
         return None
 
 
