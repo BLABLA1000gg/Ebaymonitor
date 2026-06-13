@@ -827,12 +827,17 @@ _VISION_MODEL = "meta/llama-4-maverick-17b-128e-instruct"
 
 
 def _to_hires(url: str) -> str:
-    """Convert eBay/Vinted thumbnail URLs to highest available resolution."""
+    """Convert eBay/Vinted/KA thumbnail URLs to highest available resolution."""
     if not url:
         return url
     # eBay: s-l140, s-l300, s-l500 → s-l1600 JPEG
     url = re.sub(r"s-l\d+\.\w+$", "s-l1600.jpg", url)
-    # Vinted: _1.jpg?... → _1.jpg
+    # KA: ?rule=$_57.JPG → ?rule=$_86.JPG (largest available size)
+    # IMPORTANT: do NOT strip the ?rule= param — CDN returns 400 without it
+    if "img.kleinanzeigen.de" in url:
+        url = re.sub(r"\?rule=\$_\d+\.JPG", "?rule=$_86.JPG", url, flags=re.IGNORECASE)
+        return url
+    # Vinted: _1.jpg?... → _1.jpg (remove expiring CDN token)
     url = re.sub(r"\?.*$", "", url)
     return url
 
