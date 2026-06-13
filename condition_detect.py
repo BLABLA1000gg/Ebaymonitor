@@ -352,11 +352,15 @@ def ai_assess_listing_batch(
         "  condition: integer 0-5 as above\n"
         "  functional: true ONLY if fully working, no significant damage. "
         "Set false if: cracked/broken screen, cracked back glass, water damage, "
-        "not turning on, needs repair, touch defect.\n"
+        "not turning on, needs repair, touch defect, iCloud/MDM lock, camera broken, "
+        "occasional crashes, SIM not recognized, 'für Bastler', 'Ersatzteile'.\n"
         "  battery_ok: true if battery >=81% or not mentioned, false if explicitly <81%\n"
         "  has_box: true if original box/OVP included\n"
         "  has_cable: true if original cable/charger included\n"
-        "When in doubt grade ONE level lower (be conservative). "
+        "CRITICAL: When in doubt grade ONE level lower. "
+        "Any mention of crack/Riss/Haarriss/Sprung → condition=0 regardless of how 'klein'. "
+        "'Gelegentliche Abstürze'/'startet manchmal nicht' → functional=false. "
+        "'iCloud drin'/'Account drin' without confirmed factory reset → functional=false. "
         "Output ONLY a JSON array of objects, one per listing, in order. No text."
     )
 
@@ -540,6 +544,25 @@ _PATTERNS: list[tuple[int, list[str]]] = [
         # iPad / tablet defects
         "displaybruch", "touch funktioniert nicht", "face id defekt",
         "touch id defekt", "home button defekt", "akku defekt", "akku tauschen",
+        # Common eBay/Vinted defect phrases (often buried in description)
+        "zum ausschlachten", "für bastler", "für ersatzteile", "ersatzteile oder defekt",
+        "startet nicht", "bootet nicht", "lässt sich nicht einschalten",
+        "geht nicht an", "schaltet sich nicht ein", "schaltet nicht ein",
+        "hängt sich auf", "friert ein", "abstürze", "immer wieder aus",
+        "kamera defekt", "kamera kaputt", "kamera funktioniert nicht",
+        "lautsprecher defekt", "mikrofon defekt", "wlan defekt", "bluetooth defekt",
+        "sim karte wird nicht erkannt", "sim wird nicht erkannt", "kein empfang",
+        "gesperrt", "icloud gesperrt", "icloud lock", "activation lock",
+        "mdm gesperrt", "carrier locked",
+        "wasserschaden", "wasser schaden", "liquid damage", "water damage",
+        "geruchsschaden", "brandschaden",
+        "touchscreen reagiert nicht", "display reagiert nicht",
+        "schwarzer bildschirm", "schwarzes display", "kein display",
+        "streifen auf dem display", "pixel fehler", "toter pixel",
+        "akku hält nicht", "akku schwach", "akku kaum", "akku 0",
+        "schrauben fehlen", "ersatzglas", "displayglas gebrochen",
+        # Spanish (ES) — Vinted
+        "no funciona", "pantalla rota", "cristal roto",
         # "riss", "bruch", "gebrochen" removed — too many false positives with "kein Riss" etc.
         # The AI handles these ambiguous cases correctly
     ]),
@@ -1328,17 +1351,32 @@ def ai_assess_listing_full(
         "1 = Gebraucht: Display has clearly visible heavy wear; frame/back has many scratches, dents, paint wear\n"
         "0 = Beschädigt/Defekt: Display OR frame/back has a CRACK or BREAK — buyback portals reject these\n\n"
         "functional: false if ANY of these apply: cracked/broken screen, cracked back glass, "
-        "water damage, device not turning on, needs repair, display defect, touch not working\n"
+        "water damage, device not turning on, needs repair, display defect, touch not working, "
+        "iCloud/MDM/activation lock, carrier-locked, camera broken, no SIM reception\n"
         "battery_ok: false only if description explicitly states battery <81% health\n"
         "has_box: true if original box/OVP mentioned\n"
-        "has_cable: true if original cable/charger mentioned\n\n"
-        "IMPORTANT: photo overrides text — if photo shows damage not mentioned in text, "
-        "use the lower condition. When in doubt, grade ONE level lower (be conservative).\n\n"
+        "has_cable: true if original cable/charger included\n\n"
+        "CRITICAL RULES — apply these before scoring:\n"
+        "1. Photo overrides text — if photo shows damage not mentioned in text, use lower condition\n"
+        "2. When in doubt, grade ONE level lower (conservative = you lose less money)\n"
+        "3. 'Kleinere Mängel' / 'kleiner Kratzer' with photo showing heavy wear → grade what you SEE\n"
+        "4. Only one photo or blurry/angled photo hiding the screen → risk = 'hoch'\n"
+        "5. 'Für Bastler' / 'Ersatzteile' / 'startet manchmal nicht' → functional=false\n"
+        "6. Price suspiciously low (<50% market) without explanation → risk = 'hoch'\n"
+        "7. Phrases like 'hat einen kleinen Haarriss' or 'minimaler Riss' still mean condition=0\n\n"
+        "EXAMPLES of tricky listings (learn these patterns):\n"
+        "- 'Top Zustand' but photo shows scratched frame → condition=1, risk='mittel'\n"
+        "- 'Kleinere Gebrauchsspuren' + single blurry photo → risk='hoch'\n"
+        "- 'Gerät hat minimalen Haarriss am Glas' → condition=0, functional=false\n"
+        "- 'Akku bei 79%' → battery_ok=false\n"
+        "- 'iCloud Account drin, kann zurückgesetzt werden' → functional=false (activation lock risk)\n"
+        "- 'Gelegentliche Abstürze' → functional=false\n"
+        "- 'Display hat leichte Kratzer, Rest einwandfrei' + photo confirms → condition=2\n\n"
         "risk: your confidence that buying this BLIND (sight unseen, with real money) is safe:\n"
-        "  'niedrig' = clearly a clean working phone, photos+text consistent\n"
-        "  'mittel'  = probably fine but some uncertainty (few photos, vague text)\n"
-        "  'hoch'    = red flags: possible hidden damage, contradictions, too cheap, vague\n"
-        "reason: ONE short German sentence (max 12 words) explaining your condition+risk.\n\n"
+        "  'niedrig' = clearly clean working phone, multiple photos, text+photo consistent\n"
+        "  'mittel'  = probably fine but some uncertainty (few photos, vague condition text)\n"
+        "  'hoch'    = red flags: hidden damage possible, contradictions, too cheap, vague, few photos\n"
+        "reason: ONE short German sentence (max 12 words) explaining your main concern.\n\n"
         "Reply with ONLY a JSON object, no text before or after:\n"
         '{"condition": <0-5>, "functional": <true/false>, '
         '"battery_ok": <true/false>, "has_box": <true/false>, "has_cable": <true/false>, '

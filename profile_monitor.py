@@ -188,9 +188,10 @@ def scan_profiles(
         # listing is priced against its OWN storage variant — a 256GB phone
         # must never be evaluated with 128GB buyback prices.
         buyback_by_gb: dict[int, dict[str, dict]] = {}
+        listing_gb_map: dict[str, int] = {}  # link → AI-extracted GB (fallback for Guard 5b)
         if profile.buyback_platforms:
             try:
-                buyback_by_gb = _fetch_buyback_dynamic(
+                buyback_by_gb, listing_gb_map = _fetch_buyback_dynamic(
                     profile, active, settings,
                     ct_prices, zoxs_prices, wirkaufens_prices, rebuy_prices,
                 )
@@ -482,7 +483,14 @@ def scan_profiles(
                     item_ct, item_zoxs, item_wkfs, item_rebuy = (
                         ct_prices, zoxs_prices, wirkaufens_prices, rebuy_prices)
                     if buyback_by_gb:
+                        # 1. Regex from title + description (fastest, most reliable)
                         listing_gb = _extract_listing_gb(item_desc, title=item.title)
+                        # 2. Fallback: AI-extracted GB from spec-batch in _fetch_buyback_dynamic
+                        if not listing_gb:
+                            listing_gb = listing_gb_map.get(item.link)
+                        # 3. Fallback: try dominant GB if only one variant was fetched
+                        if not listing_gb and len(buyback_by_gb) == 1:
+                            listing_gb = next(iter(buyback_by_gb))
                         gb_prices = buyback_by_gb.get(listing_gb) if listing_gb else None
                         if not gb_prices:
                             LOGGER.info(
@@ -772,10 +780,16 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
             gb = specs["storage_gb"]
             gb_votes[gb] = gb_votes.get(gb, 0) + 1
 
+    # Build per-listing link → GB map for Guard 5b fallback
+    listing_gb_map: dict[str, int] = {}
+    for item, specs in zip(active[:30], all_specs):
+        if specs and specs.get("storage_gb"):
+            listing_gb_map[item.link] = specs["storage_gb"]
+
     if not gb_votes:
         LOGGER.warning("%s: No storage size detectable in any listing — "
                        "skipping buyback fetch (cannot price safely)", profile.name)
-        return {}
+        return {}, listing_gb_map
 
     # Fetch prices for the most common storage variants (up to 3) so listings
     # of every relevant size get matched against their own buyback product.
@@ -857,7 +871,7 @@ def _fetch_buyback_dynamic(profile, active, settings, ct_prices, zoxs_prices, wi
     wirkaufens_prices.update(dom.get("wirkaufens", {}))
     rebuy_prices.update(dom.get("rebuy", {}))
 
-    return by_gb
+    return by_gb, listing_gb_map
 
 
 # Model modifiers that change the device (and its buyback price) entirely.
