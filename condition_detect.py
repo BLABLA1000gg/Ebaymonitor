@@ -1261,7 +1261,16 @@ def _image_to_b64(image_url: str) -> str | None:
             referer = "https://www.kleinanzeigen.de/"
         else:
             referer = "https://www.google.com/"
-        _LOGGER_CD.debug("Image DL — url=%s referer=%s", image_url[:80], referer)
+
+        # KA CDN (img.kleinanzeigen.de/api/v1/...) requires the same Basic auth
+        # as the mobile gateway API — without it the CDN returns HTTP 400.
+        extra_headers: dict = {}
+        if "img.kleinanzeigen.de/api/v1" in image_url:
+            from marketplaces import KA_API_BASIC_TOKEN
+            extra_headers["Authorization"] = f"Basic {KA_API_BASIC_TOKEN}"
+
+        _LOGGER_CD.debug("Image DL — url=%s referer=%s auth=%s",
+                         image_url[:80], referer, "yes" if extra_headers else "no")
         import time as _time
         _t0 = _time.monotonic()
         with CurlSession(impersonate="chrome120") as s:
@@ -1269,6 +1278,7 @@ def _image_to_b64(image_url: str) -> str | None:
                 "User-Agent": "Mozilla/5.0",
                 "Accept": "image/*,*/*",
                 "Referer": referer,
+                **extra_headers,
             })
             _elapsed = _time.monotonic() - _t0
             mime = r.headers.get("Content-Type", "?").split(";")[0].strip()
